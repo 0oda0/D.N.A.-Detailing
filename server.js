@@ -81,6 +81,7 @@ for (const [col, def] of [['car_make', "TEXT NOT NULL DEFAULT ''"], ['car_model'
 if (!orderCols.includes('reminded')) db.exec('ALTER TABLE orders ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0');
 const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
 if (!userCols.includes('tg_chat_id')) db.exec('ALTER TABLE users ADD COLUMN tg_chat_id INTEGER');
+if (!userCols.includes('avatar')) db.exec("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''");
 if (!userCols.includes('tg_token')) db.exec('ALTER TABLE users ADD COLUMN tg_token TEXT');
 db.exec(`
 CREATE TABLE IF NOT EXISTS reviews (
@@ -95,6 +96,20 @@ CREATE TABLE IF NOT EXISTS reviews (
   approved INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS cars (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  make TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
+  year INTEGER,
+  plate TEXT NOT NULL DEFAULT '',
+  color TEXT NOT NULL DEFAULT '',
+  vin TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS cars_plate ON cars(plate);
+CREATE INDEX IF NOT EXISTS orders_plate ON orders(plate);
 CREATE TABLE IF NOT EXISTS works (
   id INTEGER PRIMARY KEY,
   title TEXT NOT NULL DEFAULT '',
@@ -248,7 +263,7 @@ app.use((req, _res, next) => {
   const tok = parseCookies(req.headers.cookie).sid;
   if (tok) {
     req.user = db.prepare(
-      'SELECT u.id,u.name,u.phone,u.role FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?'
+      'SELECT u.id,u.name,u.phone,u.role,u.avatar FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?'
     ).get(tok, Date.now());
   }
   next();
@@ -542,7 +557,10 @@ app.put('/api/admin/services/:id', need('admin'), h((req) => {
 }));
 app.delete('/api/admin/services/:id', need('admin'), h((req) => { db.prepare('DELETE FROM services WHERE id=?').run(req.params.id); }));
 
-app.get('/api/admin/users', need('admin'), h(() => db.prepare('SELECT id,name,phone,role,created_at FROM users ORDER BY role, name').all()));
+app.get('/api/admin/users', need('admin'), h(() => db.prepare(`SELECT u.id,u.name,u.phone,u.role,u.avatar,u.created_at,
+    (SELECT GROUP_CONCAT(c.make || ' ' || c.model || CASE WHEN c.plate!='' THEN ' · ' || c.plate ELSE '' END, '\n') FROM cars c WHERE c.user_id=u.id) AS cars,
+    (SELECT COUNT(*) FROM orders o WHERE o.user_id=u.id AND o.status!='cancelled') AS orders
+  FROM users u ORDER BY u.role, u.name`).all()));
 app.patch('/api/admin/users/:id', need('admin'), h((req) => {
   if (!['client', 'worker', 'admin'].includes(req.body.role)) throw new HttpError(400, 'Недопустимая роль');
   if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'Нельзя менять свою роль');
@@ -683,13 +701,7 @@ const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const IMG_URL = /^\/uploads\/[a-f0-9]{24}\.(jpg|png|webp)$/;
 const IMG_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
-app.post('/api/admin/upload', need('admin'), express.raw({ type: Object.keys(IMG_TYPES), limit: '10mb' }), h((req) => {
-  const ext = IMG_TYPES[req.headers['content-type']];
-  if (!ext || !Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Нужна картинка JPG, PNG или WebP');
-  const name = crypto.randomBytes(12).toString('hex') + '.' + ext;
-  fs.writeFileSync(path.join(UPLOAD_DIR, name), req.body);
-  return { url: '/uploads/' + name };
-}));
+app.post('/api/admin/upload', need('admin'), express.raw({ type: Object.keys(IMG_TYPES), limit: '10mb' }), h((req) => ({ url: saveImage(req) })));
 app.get('/api/works', h(() => db.prepare('SELECT id,title,before_img,after_img FROM works ORDER BY sort, id DESC').all()));
 app.post('/api/admin/works', need('admin'), h((req) => {
   const { before_img: b = '', after_img: a } = req.body;
@@ -699,9 +711,84 @@ app.post('/api/admin/works', need('admin'), h((req) => {
 app.delete('/api/admin/works/:id', need('admin'), h((req) => {
   const w = db.prepare('SELECT * FROM works WHERE id=?').get(req.params.id);
   if (!w) return;
-  for (const u of [w.before_img, w.after_img]) if (IMG_URL.test(u)) fs.rmSync(path.join(UPLOAD_DIR, path.basename(u)), { force: true });
+  [w.before_img, w.after_img].forEach(removeImage);
   db.prepare('DELETE FROM works WHERE id=?').run(w.id);
 }));
+
+// ---------- профиль и гараж ----------
+function saveImage(req) {
+  const ext = IMG_TYPES[req.headers['content-type']];
+  if (!ext || !Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Нужна картинка JPG, PNG или WebP');
+  const name = crypto.randomBytes(12).toString('hex') + '.' + ext;
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), req.body);
+  return '/uploads/' + name;
+}
+const removeImage = (u) => { if (IMG_URL.test(u || '')) fs.rmSync(path.join(UPLOAD_DIR, path.basename(u)), { force: true }); };
+// незакреплённые заказы с этим госномером (например, созданные админом по звонку)
+const unlinkedByPlate = (plate) => db.prepare('SELECT COUNT(*) AS n FROM orders WHERE plate=? AND user_id IS NULL').get(plate).n;
+
+app.get('/api/me/profile', need(), h((req) => ({
+  user: db.prepare('SELECT id,name,phone,role,avatar,created_at FROM users WHERE id=?').get(req.user.id),
+  cars: db.prepare('SELECT * FROM cars WHERE user_id=? ORDER BY id').all(req.user.id),
+  stats: db.prepare("SELECT COUNT(*) AS orders, COALESCE(SUM(CASE WHEN status='done' THEN total_price END),0) AS spent FROM orders WHERE user_id=? AND status!='cancelled'").get(req.user.id),
+})));
+app.patch('/api/me', need(), h((req) => {
+  const name = str(req.body.name, 80);
+  const phone = normPhone(req.body.phone);
+  if (!name) throw new HttpError(400, 'Укажите имя');
+  if (!phone) throw new HttpError(400, 'Некорректный телефон');
+  if (db.prepare('SELECT 1 FROM users WHERE phone=? AND id!=?').get(phone, req.user.id)) throw new HttpError(400, 'Этот телефон уже занят другим аккаунтом');
+  db.prepare('UPDATE users SET name=?, phone=? WHERE id=?').run(name, phone, req.user.id);
+}));
+app.post('/api/me/avatar', need(), express.raw({ type: Object.keys(IMG_TYPES), limit: '5mb' }), h((req) => {
+  const url = saveImage(req);
+  removeImage(db.prepare('SELECT avatar FROM users WHERE id=?').get(req.user.id).avatar);
+  db.prepare('UPDATE users SET avatar=? WHERE id=?').run(url, req.user.id);
+  return { url };
+}));
+function carFields(b) {
+  const make = str(b.make, 60);
+  if (!make) throw new HttpError(400, 'Укажите марку');
+  const year = b.year ? Math.round(Number(b.year)) : null;
+  if (year !== null && !(year >= 1950 && year <= new Date().getFullYear() + 1)) throw new HttpError(400, 'Некорректный год');
+  return [make, str(b.model, 60), year, normPlate(b.plate), str(b.color, 30), str(b.vin, 17).toUpperCase(), str(b.note, 200)];
+}
+function carSaved(userId, plate) {
+  if (!plate) return {};
+  const n = unlinkedByPlate(plate);
+  if (n) {
+    const u = db.prepare('SELECT name, phone FROM users WHERE id=?').get(userId);
+    notifyAdmins(`🔗 <b>Совпадение по госномеру</b>\n${tgEsc(u.name)} ${u.phone} добавил(а) авто ${plate}.\nНайдено старых заказов без привязки: ${n}. Привязать: Админка → Пользователи.`);
+  }
+  return { matches: n };
+}
+app.post('/api/me/cars', need(), h((req) => {
+  if (db.prepare('SELECT COUNT(*) AS n FROM cars WHERE user_id=?').get(req.user.id).n >= 10) throw new HttpError(400, 'Не больше 10 авто');
+  const f = carFields(req.body);
+  db.prepare('INSERT INTO cars(user_id,make,model,year,plate,color,vin,note) VALUES(?,?,?,?,?,?,?,?)').run(req.user.id, ...f);
+  return carSaved(req.user.id, f[3]);
+}));
+app.put('/api/me/cars/:id', need(), h((req) => {
+  const f = carFields(req.body);
+  const r = db.prepare('UPDATE cars SET make=?,model=?,year=?,plate=?,color=?,vin=?,note=? WHERE id=? AND user_id=?').run(...f, req.params.id, req.user.id);
+  if (!r.changes) throw new HttpError(404, 'Авто не найдено');
+  return carSaved(req.user.id, f[3]);
+}));
+app.delete('/api/me/cars/:id', need(), h((req) => { db.prepare('DELETE FROM cars WHERE id=? AND user_id=?').run(req.params.id, req.user.id); }));
+
+// админ: совпадения «авто в гараже ↔ старые заказы без привязки» по госномеру
+app.get('/api/admin/matches', need('admin'), h(() => db.prepare(`
+  SELECT c.user_id, u.name, u.phone, c.plate, c.make, c.model, COUNT(o.id) AS n,
+    GROUP_CONCAT(o.date || ' ' || o.client_name || ' ' || o.client_phone, '; ') AS samples
+  FROM cars c JOIN users u ON u.id=c.user_id JOIN orders o ON o.plate=c.plate AND o.user_id IS NULL
+  WHERE c.plate!='' GROUP BY c.user_id, c.plate ORDER BY n DESC`).all()));
+app.post('/api/admin/matches', need('admin'), h((req) => {
+  const plate = normPlate(req.body.plate);
+  const uid = Number(req.body.user_id);
+  if (!plate || !db.prepare('SELECT 1 FROM cars WHERE user_id=? AND plate=?').get(uid, plate)) throw new HttpError(400, 'Нет такого авто у клиента');
+  return { linked: db.prepare('UPDATE orders SET user_id=? WHERE plate=? AND user_id IS NULL').run(uid, plate).changes };
+}));
+app.get('/api/admin/users/:id/cars', need('admin'), h((req) => db.prepare('SELECT * FROM cars WHERE user_id=? ORDER BY id').all(req.params.id)));
 
 app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Не найдено')));
 app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));

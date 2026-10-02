@@ -41,12 +41,12 @@ function renderNav() {
   const r = location.hash.split('?')[0] || '#/';
   const links = [['#/', 'Главная'], ['#/book', 'Записаться']];
   if (me) {
-    links.push(['#/my', 'Мои заказы']);
+    links.push(['#/my', 'Мои заказы'], ['#/profile', 'Профиль']);
     if (me.role === 'worker' || me.role === 'admin') links.push(['#/staff', 'Работы']);
     if (me.role === 'admin') links.push(['#/admin', 'Админка']);
   } else links.push(['#/login', 'Вход'], ['#/register', 'Регистрация']);
   document.getElementById('nav').innerHTML =
-    links.map(([h, t]) => `<a href="${h}" class="${r === h ? 'active' : ''}">${t}</a>`).join('') +
+    links.map(([h, t]) => `<a href="${h}" class="${r === h ? 'active' : ''}">${h === '#/profile' ? avatarHtml(me, 24) + ' ' : ''}${t}</a>`).join('') +
     (me ? `<button id="logout" title="${esc(me.phone)}">Выйти (${esc(me.name)})</button>` : '') +
     `<button class="theme-btn" id="theme" title="${THEMES[getTheme()][1]}">${THEMES[getTheme()][0]}</button>`;
   document.getElementById('theme').onclick = () => { setTheme(nextTheme[getTheme()]); renderNav(); toast(THEMES[getTheme()][1]); };
@@ -208,7 +208,7 @@ function bookingForm(container, { admin, onDone }) {
         <label>Имя</label><input id="b-cname">
         <label>Телефон</label><input id="b-cphone" type="tel" placeholder="+7…"></div>` : ''}
       <div class="card"><h3>1. Что сделать</h3><div class="grid" id="b-services"></div></div>
-      <div class="card"><h3>2. Автомобиль</h3>
+      <div class="card"><h3>2. Автомобиль</h3><div class="slots" id="b-garage"></div>
         <label>Марка</label>
         <input id="b-make" list="b-makes" maxlength="60" autocomplete="off" placeholder="Начните вводить: BMW, Лада, Haval…" value="${esc(draft.car_make)}"><datalist id="b-makes"></datalist>
         <label>Модель</label>
@@ -296,6 +296,19 @@ function bookingForm(container, { admin, onDone }) {
       draft.car_make = e.target.value; draft.car_model = ''; q('b-model').value = ''; setModels();
     };
   });
+  let garage = [];
+  if (!admin && me) api('/api/me/profile').then(({ cars }) => {
+    garage = cars;
+    const pick = (c) => {
+      Object.assign(draft, { car_make: c.make, car_model: c.model, plate: c.plate });
+      q('b-make').value = c.make; q('b-model').value = c.model; q('b-plate').value = plateView(c.plate);
+      q('b-garage').querySelectorAll('.slot').forEach((x) => x.classList.toggle('on', Number(x.dataset.car) === c.id));
+    };
+    if (cars.length) q('b-garage').innerHTML = '<span class="muted" style="align-self:center">Из гаража:</span>' + cars.map((c) => `<button type="button" class="slot" data-car="${c.id}">🚗 ${esc(carTitle(c))}${c.plate ? ' · ' + esc(plateView(c.plate)) : ''}</button>`).join('');
+    q('b-garage').querySelectorAll('.slot').forEach((x) => (x.onclick = () => pick(cars.find((c) => c.id === Number(x.dataset.car)))));
+    const want = Number(params.get('car')) || (cars.length === 1 && !draft.car_make ? cars[0].id : 0);
+    if (want && cars.find((c) => c.id === want)) pick(cars.find((c) => c.id === want));
+  }).catch(() => {});
   q('b-make').oninput = (e) => (draft.car_make = e.target.value);
   q('b-model').oninput = (e) => (draft.car_model = e.target.value);
   q('b-plate').oninput = (e) => (draft.plate = plateRaw(e.target.value));
@@ -325,6 +338,9 @@ function bookingForm(container, { admin, onDone }) {
     q('b-submit').disabled = true;
     try {
       await api(admin ? '/api/admin/orders' : '/api/orders', body);
+      // новое авто клиента сохраняем в гараж, чтобы в следующий раз выбрать в один клик
+      if (!admin && !garage.some((c) => (body.plate && c.plate === body.plate) || (c.make === body.car_make && c.model === body.car_model)))
+        api('/api/me/cars', { make: body.car_make, model: body.car_model, plate: body.plate }).catch(() => {});
       Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', start: null, comment: '' });
       onDone();
     } catch (e) { err.textContent = e.message; loadSlots(); }
@@ -385,19 +401,11 @@ pages['/my'] = async () => {
     <div class="steps">${orders.length ? orders.map((o) => `<div class="card">${orderLine(o)}
       ${['new', 'confirmed'].includes(o.status) ? `<button class="btn small ghost" data-cancel="${o.id}" style="margin-top:10px">Отменить</button>` : ''}
       ${o.status === 'done' && !o.has_review ? `<div data-review="${o.id}" style="margin-top:10px"><button class="btn small ghost">⭐ Оставить отзыв</button></div>` : ''}</div>`).join('')
-      : '<div class="empty">Заказов пока нет</div>'}</div>
-    <details class="card" style="margin-top:24px"><summary>Сменить пароль</summary>
-      <form id="pw" class="form" style="margin:0"><label>Старый пароль</label><input name="old" type="password" required>
-      <label>Новый пароль</label><input name="password" type="password" minlength="6" required>
-      <button class="btn small" style="margin-top:10px">Сохранить</button></form></details>`;
+      : '<div class="empty">Заказов пока нет</div>'}</div>`;
   $app.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = async () => {
     if (!confirm('Отменить запись?')) return;
     try { await api(`/api/orders/${b.dataset.cancel}/cancel`, {}); toast('Запись отменена'); route(); } catch (e) { toast(e.message, 1); }
   }));
-  document.getElementById('pw').onsubmit = async (e) => {
-    e.preventDefault();
-    try { await api('/api/me/password', formData(e.target)); toast('Пароль изменён'); e.target.reset(); } catch (er) { toast(er.message, 1); }
-  };
   $app.querySelectorAll('[data-review]').forEach((b) => (b.querySelector('button').onclick = () => reviewForm(b, Number(b.dataset.review))));
   tgCard(document.getElementById('tg-box'), 'Напомним о записи за день до визита и сообщим, когда автомобиль будет готов.');
 };
@@ -527,14 +535,24 @@ async function adminLeads(c) {
 }
 
 async function adminUsers(c) {
-  const users = await api('/api/admin/users');
-  c.innerHTML = `<p class="muted">Мастер может зарегистрироваться сам с кодом сотрудника или вы можете повысить клиента здесь.</p>
-    <div class="table"><table><thead><tr><th>Имя</th><th>Телефон</th><th>Роль</th><th>Создан</th></tr></thead><tbody>
-    ${users.map((u) => `<tr><td>${esc(u.name)}</td><td><a href="tel:${esc(u.phone)}">${esc(u.phone)}</a></td>
+  const [users, matches] = await Promise.all([api('/api/admin/users'), api('/api/admin/matches')]);
+  c.innerHTML = `${matches.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px"><h3>🔗 Совпадения по госномерам</h3>
+      <p class="muted">Клиент добавил в гараж авто, на номер которого уже есть заказы без привязки к аккаунту (например, созданные вручную по звонку). Проверьте и привяжите — история и отчёты по клиенту станут полными.</p>
+      <div class="table"><table><thead><tr><th>Клиент</th><th>Авто</th><th>Заказов</th><th>Прошлые заказы</th><th></th></tr></thead><tbody>
+      ${matches.map((m) => `<tr><td>${esc(m.name)}<br><span class="muted">${esc(phoneView(m.phone))}</span></td><td>${esc(m.make)} ${esc(m.model)}<br><span class="plate">${esc(plateView(m.plate))}</span></td>
+        <td>${m.n}</td><td class="muted" style="max-width:320px">${esc(m.samples)}</td>
+        <td><button class="btn small" data-link="${m.user_id}" data-plate="${esc(m.plate)}">Привязать</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+    <p class="muted">Мастер может зарегистрироваться сам с кодом сотрудника или вы можете повысить клиента здесь.</p>
+    <div class="table"><table><thead><tr><th></th><th>Имя</th><th>Телефон</th><th>Гараж</th><th>Заказов</th><th>Роль</th><th>Создан</th></tr></thead><tbody>
+    ${users.map((u) => `<tr><td>${avatarHtml(u, 36)}</td><td>${esc(u.name)}</td><td><a href="tel:${esc(u.phone)}">${esc(phoneView(u.phone))}</a></td>
+      <td class="muted" style="white-space:pre-line">${esc(u.cars || '—')}</td><td>${u.orders}</td>
       <td>${u.id === me.id ? ROLE[u.role] : `<select data-u="${u.id}">${Object.entries(ROLE).map(([k, v]) => `<option value="${k}" ${k === u.role ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
       <td class="muted">${esc(u.created_at.slice(0, 10))}</td></tr>`).join('')}</tbody></table></div>`;
   c.querySelectorAll('[data-u]').forEach((s) => (s.onchange = async () => {
     try { await api(`/api/admin/users/${s.dataset.u}`, { role: s.value }, 'PATCH'); toast('Роль изменена'); } catch (e) { toast(e.message, 1); adminUsers(c); }
+  }));
+  c.querySelectorAll('[data-link]').forEach((b) => (b.onclick = async () => {
+    try { const r = await api('/api/admin/matches', { user_id: b.dataset.link, plate: b.dataset.plate }); toast(`Привязано заказов: ${r.linked}`); adminUsers(c); } catch (e) { toast(e.message, 1); }
   }));
 }
 
@@ -866,6 +884,103 @@ function callBubble() {
   setTimeout(show, 20000);   // первый раз — через 20 секунд на сайте
   setInterval(show, 120000); // дальше — раз в 2 минуты
 }
+
+// ---------- профиль и гараж ----------
+const avatarHtml = (u, size = 32) => u.avatar
+  ? `<img class="ava" src="${esc(u.avatar)}" alt="" style="width:${size}px;height:${size}px">`
+  : `<span class="ava ava-empty" style="width:${size}px;height:${size}px;font-size:${size * 0.42}px">${esc((u.name || '?')[0].toUpperCase())}</span>`;
+const carTitle = (c) => [c.make, c.model, c.year].filter(Boolean).join(' ');
+
+function carForm(box, car, onSaved) {
+  box.innerHTML = `<form class="card car-form">
+    <div class="grid">
+      <div><label>Марка *</label><input name="make" list="cf-makes" required maxlength="60" autocomplete="off" value="${esc(car.make || '')}"><datalist id="cf-makes"></datalist></div>
+      <div><label>Модель</label><input name="model" list="cf-models" maxlength="60" autocomplete="off" value="${esc(car.model || '')}"><datalist id="cf-models"></datalist></div>
+      <div><label>Год выпуска</label><input name="year" type="number" min="1950" max="${new Date().getFullYear() + 1}" value="${car.year || ''}"></div>
+      <div><label>Госномер</label><input name="plate" data-plate maxlength="12" autocomplete="off" placeholder="А 123 ВС 777" value="${esc(plateView(car.plate || ''))}" style="text-transform:uppercase"></div>
+      <div><label>Цвет</label><input name="color" maxlength="30" value="${esc(car.color || '')}"></div>
+      <div><label>VIN</label><input name="vin" maxlength="17" value="${esc(car.vin || '')}" style="text-transform:uppercase"></div>
+    </div>
+    <label>Заметка (плёнка, особенности, пожелания)</label><input name="note" maxlength="200" value="${esc(car.note || '')}">
+    <div style="margin-top:12px;display:flex;gap:8px"><button class="btn small">${car.id ? 'Сохранить' : 'Добавить в гараж'}</button><button type="button" class="btn small ghost" data-cancel>Отмена</button></div>
+  </form>`;
+  const f = box.querySelector('form');
+  loadCars().then((cars) => {
+    const setModels = () => { const m = findMake(cars, f.make.value); f.querySelector('#cf-models').innerHTML = m ? m[3].map((x) => `<option value="${esc(x[0])}">${esc(x[1] || '')}</option>`).join('') : ''; };
+    f.querySelector('#cf-makes').innerHTML = cars.map((m) => `<option value="${esc(m[0])}">${esc(m[1])}</option>`).join('');
+    setModels();
+    f.make.onchange = () => { const m = findMake(cars, f.make.value); if (m) f.make.value = m[0]; setModels(); };
+  });
+  f.querySelector('[data-cancel]').onclick = () => (box.innerHTML = '');
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    const d = formData(f); d.plate = plateRaw(d.plate);
+    if (!plateOk(d.plate)) return toast('Госномер в формате А 123 ВС 777', 1);
+    try {
+      const r = await api(car.id ? `/api/me/cars/${car.id}` : '/api/me/cars', d, car.id ? 'PUT' : 'POST');
+      toast(r.matches ? `Сохранено. Нашли прошлые заказы на этот номер (${r.matches}) — администратор привяжет их к вашему профилю.` : 'Сохранено');
+      onSaved();
+    } catch (er) { toast(er.message, 1); }
+  };
+}
+
+pages['/profile'] = async () => {
+  if (!me) return (location.hash = '#/login?next=profile');
+  const { user, cars, stats } = await api('/api/me/profile');
+  $app.innerHTML = `
+  <div class="profile-head card">
+    <label class="ava-up" title="Сменить фото">${avatarHtml(user, 96)}<span>📷</span><input type="file" accept="image/*" id="ava-file" hidden></label>
+    <div><h1 style="margin:0">${esc(user.name)}</h1><div class="muted">${esc(phoneView(user.phone))} · ${ROLE[user.role]} · с ${esc(user.created_at.slice(0, 10))}</div>
+      <div class="muted" style="margin-top:6px">Заказов: <b>${stats.orders}</b> · Выполнено работ на <b>${rub(stats.spent)}</b></div></div>
+  </div>
+  <div class="two" style="margin-top:16px">
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">🚗 Мой гараж</h2><button class="btn small" id="car-add">+ Добавить авто</button></div>
+      <div id="car-form-box" style="margin-top:12px"></div>
+      <div class="grid garage" style="margin-top:12px">${cars.length ? cars.map((c) => `<div class="card">
+        <h3>${esc(carTitle(c))}</h3>
+        ${c.plate ? `<span class="plate">${esc(plateView(c.plate))}</span>` : ''}
+        <div class="muted" style="margin-top:6px">${[c.color, c.vin && 'VIN ' + c.vin].filter(Boolean).map(esc).join(' · ')}</div>
+        ${c.note ? `<div class="muted">📝 ${esc(c.note)}</div>` : ''}
+        <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"><a class="btn small" href="#/book?car=${c.id}">Записать</a>
+          <button class="btn small ghost" data-edit="${c.id}">Изменить</button><button class="btn small ghost" data-del="${c.id}">Удалить</button></div>
+      </div>`).join('') : '<div class="empty">Добавьте свой автомобиль — при записи не придётся вводить данные заново, а по госномеру мы найдём историю обслуживания.</div>'}</div>
+    </div>
+    <div>
+      <form class="card" id="pf"><h3>Личные данные</h3>
+        <label>Имя</label><input name="name" value="${esc(user.name)}" required maxlength="80">
+        <label>Телефон</label><input name="phone" type="tel" value="${esc(phoneView(user.phone))}" required>
+        <button class="btn small" style="margin-top:12px">Сохранить</button></form>
+      <div id="tg-box"></div>
+      <details class="card"><summary>Сменить пароль</summary>
+        <form id="pw" style="margin:0"><label>Старый пароль</label><input name="old" type="password" required>
+        <label>Новый пароль</label><input name="password" type="password" minlength="6" required>
+        <button class="btn small" style="margin-top:10px">Сохранить</button></form></details>
+    </div>
+  </div>`;
+  const fbox = document.getElementById('car-form-box');
+  document.getElementById('car-add').onclick = () => carForm(fbox, {}, route);
+  $app.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => { carForm(fbox, cars.find((c) => c.id === Number(b.dataset.edit)), route); fbox.scrollIntoView({ behavior: 'smooth' }); }));
+  $app.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { if (confirm('Удалить авто из гаража?')) { await api(`/api/me/cars/${b.dataset.del}`, undefined, 'DELETE'); route(); } }));
+  document.getElementById('ava-file').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      const blob = await shrinkImage(file, 400);
+      const r = await fetch('/api/me/avatar', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+      const d = await r.json(); if (!r.ok) throw new Error(d.error);
+      me.avatar = d.url; toast('Фото обновлено'); route();
+    } catch (er) { toast(er.message || 'Ошибка загрузки', 1); }
+  };
+  document.getElementById('pf').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/api/me', formData(e.target), 'PATCH'); me = await api('/api/me'); toast('Сохранено'); route(); } catch (er) { toast(er.message, 1); }
+  };
+  document.getElementById('pw').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/api/me/password', formData(e.target)); toast('Пароль изменён'); e.target.reset(); } catch (er) { toast(er.message, 1); }
+  };
+  tgCard(document.getElementById('tg-box'), 'Напомним о записи за день до визита и сообщим, когда автомобиль будет готов.');
+};
 
 // ---------- router ----------
 async function refreshServices() { services = await api('/api/services'); }
