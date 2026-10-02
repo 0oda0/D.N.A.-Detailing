@@ -58,32 +58,103 @@ function renderNav() {
 // ---------- pages ----------
 const pages = {};
 
+const ADVANTAGES = [
+  ['🧪', 'Профессиональная химия', 'Работаем проверенными составами — безопасно для ЛКП, кожи и пластика'],
+  ['💰', 'Цена до начала работ', 'Осматриваем авто и называем точную стоимость — без сюрпризов в конце'],
+  ['⏱', 'Точное время', 'Длительность каждой процедуры известна заранее — забираете авто к сроку'],
+  ['🚐', 'Выезд к вам', 'Химчистка салона и мебели у вас дома или в гараже'],
+];
+const STEPS = [
+  ['Запись', 'Онлайн на свободное время, в Telegram или по телефону'],
+  ['Осмотр', 'Оцениваем состояние и фиксируем стоимость'],
+  ['Работа', 'Выполняем процедуры в оговорённое время'],
+  ['Приёмка', 'Показываем результат и даём рекомендации по уходу'],
+];
+const FAQ = [
+  ['Сколько стоят работы?', 'На сайте указаны цены «от». Итоговую стоимость называем после осмотра — она зависит от класса и состояния авто. Напишите в Telegram, пришлите фото — посчитаем заранее.'],
+  ['Сколько времени займёт?', 'Длительность каждой услуги указана в карточке. При онлайн-записи сайт сам суммирует время и показывает только те окна, когда мы свободны.'],
+  ['Можно оставить машину на день?', 'Да. Для бронирования плёнкой, шумоизоляции и комплексных работ авто остаётся у нас — время согласуем при записи.'],
+  ['Вы выезжаете?', 'Да, химчистку салона и мягкой мебели делаем на выезде по Балашихе и окрестностям.'],
+  ['Как отменить или перенести запись?', 'В личном кабинете в разделе «Мои заказы» или сообщением в Telegram.'],
+];
+const scrollTo = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
+
 pages['/'] = () => {
+  const tg = `https://t.me/${TG[0][0]}`;
   $app.innerHTML = `
   <section class="hero">
+    <div class="tag">📍 Балашиха, ул. Свердлова · новый детейлинг-центр</div>
     <h1>D.N.A.<span>DETAILING</span></h1>
     <p>Чистота в деталях • Совершенство в результате</p>
-    <div class="lead">Новый детейлинг-центр в Балашихе на ул. Свердлова. Наводим идеальный лоск, защищаем кузов от сколов и возвращаем салону вид нового авто.</div>
+    <div class="lead">Наводим идеальный лоск, защищаем кузов от сколов и возвращаем салону вид нового авто.</div>
+    <ul class="ticks">
+      <li>Онлайн-запись только на свободное время</li>
+      <li>Стоимость фиксируем до начала работ</li>
+      <li>Выездная химчистка салона и мебели</li>
+    </ul>
     <div class="row">
-      <a class="btn" href="#/book">Записаться онлайн</a>
-      <a class="btn ghost" href="https://t.me/${TG[0][0]}" target="_blank" rel="noopener">Написать в Telegram</a>
-      <a class="btn ghost" href="tel:${tel()}">${esc(settings.phone)}</a>
+      <a class="btn big" href="#/book">Записаться онлайн</a>
+      <button class="btn ghost big" data-scroll="calc">Рассчитать стоимость</button>
     </div>
   </section>
-  <h2>Услуги</h2>
-  <div class="grid">${services.map((s) => `
-    <div class="card">
-      <h3>${esc(s.name)}</h3>
-      <div class="muted">${esc(s.description)}</div>
-      <p><span class="price">от ${rub(s.price)}</span> · <span class="muted">${dur(s.duration)}</span></p>
-      <a class="btn small" href="#/book?s=${s.id}">Записаться</a>
-    </div>`).join('')}
-  </div>
-  <div class="banner">
+
+  <section class="stats reveal">
+    <div><b>${services.length}</b><span>видов работ</span></div>
+    <div><b>от ${dur(Math.min(...services.map((s) => s.duration)))}</b><span>самая быстрая услуга</span></div>
+    <div><b>${hm(settings.open_min)}–${hm(settings.close_min)}</b><span>работаем ежедневно</span></div>
+    <div><b>24/7</b><span>онлайн-запись</span></div>
+  </section>
+
+  <section class="reveal"><h2>Почему D.N.A.</h2>
+    <div class="grid">${ADVANTAGES.map(([i, t, d]) => `<div class="card adv"><div class="ico">${i}</div><h3>${t}</h3><div class="muted">${d}</div></div>`).join('')}</div>
+  </section>
+
+  <section class="reveal" id="services"><h2>Услуги и цены</h2>
+    <div class="grid">${services.map((s) => `
+      <div class="card svc">
+        <h3>${esc(s.name)}</h3>
+        <div class="muted">${esc(s.description)}</div>
+        <p><span class="price">от ${rub(s.price)}</span> · <span class="muted">⏱ ${dur(s.duration)}</span></p>
+        <a class="btn small" href="#/book?s=${s.id}">Записаться</a>
+      </div>`).join('')}
+    </div>
+  </section>
+
+  <section class="card calc reveal" id="calc">
+    <h2>Калькулятор</h2>
+    <p class="muted">Отметьте нужные работы — посчитаем ориентировочную стоимость и время</p>
+    <div class="grid" id="calc-list">${services.map((s) => `
+      <label class="check"><input type="checkbox" value="${s.id}"><span><b>${esc(s.name)}</b><br><span class="muted">от ${rub(s.price)} · ${dur(s.duration)}</span></span></label>`).join('')}
+    </div>
+    <div class="calc-res"><div>Итого: <b class="price" id="calc-sum">0 ₽</b> · <span id="calc-dur">0 мин</span></div>
+      <a class="btn" id="calc-go" href="#/book">Записаться на эти работы</a></div>
+  </section>
+
+  <section class="reveal"><h2>Как мы работаем</h2>
+    <div class="steps4">${STEPS.map(([t, d], i) => `<div class="card"><div class="num">${i + 1}</div><h3>${t}</h3><div class="muted">${d}</div></div>`).join('')}</div>
+  </section>
+
+  <div class="banner reveal">
     <div><h2>Выездные работы</h2><div>Нет времени ехать к нам? Почистим салон или мебель прямо у вас дома или в гараже.</div></div>
-    <a class="btn ghost" href="tel:${tel()}">${esc(settings.phone)}</a>
+    <a class="btn ghost" href="${tg}" target="_blank" rel="noopener">Заказать выезд</a>
   </div>
-  <h2 style="margin-top:32px">Контакты</h2>
+
+  <section class="reveal"><h2>Частые вопросы</h2>
+    <div class="faq">${FAQ.map(([q, a]) => `<details class="card"><summary>${q}</summary><div class="muted">${a}</div></details>`).join('')}</div>
+  </section>
+
+  <section class="card lead-form reveal" id="lead">
+    <div><h2>Не знаете, что выбрать?</h2><p class="muted">Оставьте номер — перезвоним за 15 минут в рабочее время, подскажем и посчитаем стоимость.</p></div>
+    <form id="lf">
+      <input name="name" placeholder="Имя" maxlength="80" required>
+      <input name="phone" type="tel" placeholder="+7 900 000-00-00" required>
+      <input name="message" placeholder="Авто и что нужно сделать (необязательно)" maxlength="500">
+      <button class="btn">Перезвоните мне</button>
+      <div class="muted small">Нажимая кнопку, вы соглашаетесь на обработку персональных данных</div>
+    </form>
+  </section>
+
+  <section class="reveal" id="contacts"><h2>Контакты</h2>
   <div class="grid">
     <div class="card"><h3>📍 Адрес</h3><div>${esc(settings.address)}</div>
       <p class="muted">Ежедневно ${hm(settings.open_min)}–${hm(settings.close_min)}</p>
@@ -93,14 +164,32 @@ pages['/'] = () => {
       <div style="margin-top:6px">Телефон <a href="tel:${tel()}">${esc(settings.phone)}</a></div></div>
     <div class="card"><h3>📣 Наш канал</h3><div class="muted">Работы, акции и новости</div>
       <a class="btn small" style="margin-top:10px" href="${TG_CHANNEL}" target="_blank" rel="noopener">t.me/DNADetailing</a></div>
-  </div>`;
+  </div></section>`;
+
+  $app.querySelectorAll('[data-scroll]').forEach((b) => (b.onclick = () => scrollTo(b.dataset.scroll)));
+  const calc = () => {
+    const ids = [...$app.querySelectorAll('#calc-list input:checked')].map((i) => Number(i.value));
+    const sel = services.filter((s) => ids.includes(s.id));
+    $app.querySelectorAll('#calc-list .check').forEach((l) => l.classList.toggle('on', l.querySelector('input').checked));
+    document.getElementById('calc-sum').textContent = 'от ' + rub(sel.reduce((a, s) => a + s.price, 0));
+    document.getElementById('calc-dur').textContent = '⏱ ' + dur(sel.reduce((a, s) => a + s.duration, 0));
+    document.getElementById('calc-go').href = ids.length ? `#/book?s=${ids.join(',')}` : '#/book';
+  };
+  $app.querySelectorAll('#calc-list input').forEach((i) => (i.onchange = calc));
+  document.getElementById('lf').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/api/leads', formData(e.target)); e.target.reset(); toast('Спасибо! Скоро перезвоним.'); }
+    catch (er) { toast(er.message, 1); }
+  };
+  const io = new IntersectionObserver((es) => es.forEach((x) => x.isIntersecting && (x.target.classList.add('in'), io.unobserve(x.target))), { threshold: 0.08 });
+  $app.querySelectorAll('.reveal').forEach((el) => io.observe(el));
 };
 
 // Компонент записи: услуги → авто → дата → свободное время. Используется клиентом и админом.
 const draft = { services: [], car: '', date: '', start: null, comment: '' };
 function bookingForm(container, { admin, onDone }) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
-  if (params.get('s') && !draft.services.length) draft.services = [Number(params.get('s'))];
+  if (params.get('s')) draft.services = params.get('s').split(',').map(Number).filter((id) => services.some((x) => x.id === id));
   if (!draft.date) draft.date = today();
   let users = [];
 
@@ -347,6 +436,7 @@ pages['/staff'] = async () => {
 const adminTabs = {
   orders: ['Заказы', (c) => ordersBoard(c, { admin: true })],
   create: ['+ Новый заказ', (c) => bookingForm(c, { admin: true, onDone: () => { toast('Заказ создан'); location.hash = '#/admin?tab=orders'; } })],
+  leads: ['Заявки', adminLeads],
   services: ['Услуги', adminServices],
   users: ['Пользователи', adminUsers],
   settings: ['Настройки', adminSettings],
@@ -387,6 +477,18 @@ async function adminServices(c) {
       await api(`/api/admin/services/${id}`, undefined, 'DELETE'); await refreshServices(); adminServices(c);
     };
   });
+}
+
+async function adminLeads(c) {
+  const leads = await api('/api/admin/leads');
+  c.innerHTML = leads.length ? `<div class="table"><table><thead><tr><th>Когда</th><th>Имя</th><th>Телефон</th><th>Комментарий</th><th>Обработана</th><th></th></tr></thead><tbody>
+    ${leads.map((l) => `<tr style="${l.done ? 'opacity:.5' : ''}"><td class="muted">${esc(l.created_at.slice(0, 16))}</td><td>${esc(l.name)}</td>
+      <td><a href="tel:${esc(l.phone)}">${esc(l.phone)}</a></td><td>${esc(l.message)}</td>
+      <td><input type="checkbox" data-done="${l.id}" ${l.done ? 'checked' : ''} style="width:auto"></td>
+      <td><button class="btn small danger" data-del="${l.id}">×</button></td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="empty">Заявок на обратный звонок пока нет</div>';
+  c.querySelectorAll('[data-done]').forEach((i) => (i.onchange = async () => { await api(`/api/admin/leads/${i.dataset.done}`, { done: i.checked }, 'PATCH'); adminLeads(c); }));
+  c.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { if (confirm('Удалить заявку?')) { await api(`/api/admin/leads/${b.dataset.del}`, undefined, 'DELETE'); adminLeads(c); } }));
 }
 
 async function adminUsers(c) {
@@ -436,8 +538,19 @@ async function route() {
   window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', route);
+function floatButtons() {
+  const d = document.createElement('div');
+  d.className = 'fab';
+  d.innerHTML = `<a href="https://t.me/${TG[0][0]}" target="_blank" rel="noopener" class="fab-tg" title="Telegram">✈</a>
+    <a href="tel:${tel()}" class="fab-tel" title="Позвонить">📞</a>`;
+  document.body.appendChild(d);
+  const m = document.createElement('a');
+  m.className = 'mobile-cta btn'; m.href = '#/book'; m.textContent = 'Записаться онлайн';
+  document.body.appendChild(m);
+}
 (async () => {
   [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
   await refreshServices();
+  floatButtons();
   route();
 })();

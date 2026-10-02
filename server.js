@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS order_services (
   duration INTEGER NOT NULL,
   price INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS leads (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  message TEXT NOT NULL DEFAULT '',
+  done INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 
@@ -282,6 +290,14 @@ app.get('/api/slots', h((req) => {
   return { duration, slots: freeSlots(str(req.query.date, 10), duration) };
 }));
 
+app.post('/api/leads', h((req) => {
+  throttle(req);
+  const name = str(req.body.name, 80);
+  const phone = normPhone(req.body.phone);
+  if (!name || !phone) throw new HttpError(400, 'Укажите имя и корректный телефон');
+  db.prepare('INSERT INTO leads(name,phone,message) VALUES(?,?,?)').run(name, phone, str(req.body.message, 500));
+}));
+
 // --- orders ---
 function createOrder(body, { userId, clientName, clientPhone, adminMode }) {
   const services = pickServices(body.services);
@@ -381,6 +397,10 @@ app.post('/api/admin/orders', need('admin'), h((req) => {
   return createOrder(req.body, { userId, clientName, clientPhone, adminMode: true });
 }));
 app.delete('/api/admin/orders/:id', need('admin'), h((req) => { db.prepare('DELETE FROM orders WHERE id=?').run(req.params.id); }));
+
+app.get('/api/admin/leads', need('admin'), h(() => db.prepare('SELECT * FROM leads ORDER BY done, id DESC LIMIT 500').all()));
+app.patch('/api/admin/leads/:id', need('admin'), h((req) => { db.prepare('UPDATE leads SET done=? WHERE id=?').run(req.body.done ? 1 : 0, req.params.id); }));
+app.delete('/api/admin/leads/:id', need('admin'), h((req) => { db.prepare('DELETE FROM leads WHERE id=?').run(req.params.id); }));
 
 app.get('/api/admin/services', need('admin'), h(() => db.prepare('SELECT * FROM services ORDER BY sort,id').all()));
 function serviceFields(b) {
