@@ -21,10 +21,10 @@ cd "$APP_DIR" && npm ci --omit=dev --no-audit --no-fund
 
 # Секреты создаются один раз и хранятся в /opt/dna-detailing/.env
 if [ ! -f "$APP_DIR/.env" ]; then
-  ADMIN_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 14)
-  WORKER_CODE=$(tr -dc 'a-z0-9' </dev/urandom | head -c 8)
+  ADMIN_PASSWORD=$(node -e "console.log(require('crypto').randomBytes(9).toString('base64url'))")
+  WORKER_CODE=$(node -e "console.log(require('crypto').randomBytes(4).toString('hex'))")
   cat > "$APP_DIR/.env" <<ENV
-PORT=80
+PORT=${PORT:-80}
 TZ=Europe/Moscow
 ADMIN_PHONE=+79686107799
 ADMIN_PASSWORD=$ADMIN_PASSWORD
@@ -57,7 +57,7 @@ UNIT
 systemctl daemon-reload
 systemctl enable dna-detailing >/dev/null
 systemctl restart dna-detailing
-command -v ufw >/dev/null && ufw status | grep -q active && ufw allow 80/tcp || true
+command -v ufw >/dev/null && ufw status | grep -q active && ufw allow "$(grep ^PORT= "$APP_DIR/.env" | cut -d= -f2)/tcp" || true
 sleep 2
 systemctl --no-pager status dna-detailing | head -5
-echo ">> Готово: http://$(curl -s4 https://ifconfig.me || hostname -I | awk '{print $1}')/"
+echo ">> Готово: http://$(hostname -I | awk '{print $1}'):$(grep ^PORT= "$APP_DIR/.env" | cut -d= -f2)/"
