@@ -15,6 +15,9 @@ const isoDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStar
 const today = () => isoDate(new Date());
 const STATUS = { new: 'Новый', confirmed: 'Подтверждён', in_progress: 'В работе', done: 'Готово', cancelled: 'Отменён' };
 const ROLE = { client: 'Клиент', worker: 'Мастер', admin: 'Админ' };
+const TG = [['brorussian8', 'Даниил'], ['nikilovs', 'Никита']];
+const TG_CHANNEL = 'https://t.me/DNADetailing';
+const tel = () => esc(settings.phone.replace(/[^\d+]/g, ''));
 const badge = (s) => `<span class="badge st-${s}">${STATUS[s]}</span>`;
 
 async function api(url, body, method) {
@@ -48,7 +51,7 @@ function renderNav() {
   const lo = document.getElementById('logout');
   if (lo) lo.onclick = async () => { await api('/api/logout', {}); me = null; location.hash = '#/'; route(); };
   document.getElementById('foot-contacts').innerHTML = settings
-    ? `<a href="tel:${esc(settings.phone.replace(/[^\d+]/g, ''))}">${esc(settings.phone)}</a> · ${esc(settings.address)} · ${hm(settings.open_min)}–${hm(settings.close_min)}`
+    ? `<a href="tel:${tel()}">${esc(settings.phone)}</a> · ${TG.map(([u]) => `<a href="https://t.me/${u}" target="_blank" rel="noopener">@${u}</a>`).join(' · ')} · <a href="${TG_CHANNEL}" target="_blank" rel="noopener">Канал</a><br>${esc(settings.address)} · ${hm(settings.open_min)}–${hm(settings.close_min)}`
     : '';
 }
 
@@ -60,9 +63,11 @@ pages['/'] = () => {
   <section class="hero">
     <h1>D.N.A.<span>DETAILING</span></h1>
     <p>Чистота в деталях • Совершенство в результате</p>
+    <div class="lead">Новый детейлинг-центр в Балашихе на ул. Свердлова. Наводим идеальный лоск, защищаем кузов от сколов и возвращаем салону вид нового авто.</div>
     <div class="row">
       <a class="btn" href="#/book">Записаться онлайн</a>
-      <a class="btn ghost" href="tel:${esc(settings.phone.replace(/[^\d+]/g, ''))}">${esc(settings.phone)}</a>
+      <a class="btn ghost" href="https://t.me/${TG[0][0]}" target="_blank" rel="noopener">Написать в Telegram</a>
+      <a class="btn ghost" href="tel:${tel()}">${esc(settings.phone)}</a>
     </div>
   </section>
   <h2>Услуги</h2>
@@ -75,8 +80,19 @@ pages['/'] = () => {
     </div>`).join('')}
   </div>
   <div class="banner">
-    <div><h2>Выездные работы</h2><div>Мы приедем к вам!</div></div>
-    <a class="btn ghost" href="tel:${esc(settings.phone.replace(/[^\d+]/g, ''))}">${esc(settings.phone)}</a>
+    <div><h2>Выездные работы</h2><div>Нет времени ехать к нам? Почистим салон или мебель прямо у вас дома или в гараже.</div></div>
+    <a class="btn ghost" href="tel:${tel()}">${esc(settings.phone)}</a>
+  </div>
+  <h2 style="margin-top:32px">Контакты</h2>
+  <div class="grid">
+    <div class="card"><h3>📍 Адрес</h3><div>${esc(settings.address)}</div>
+      <p class="muted">Ежедневно ${hm(settings.open_min)}–${hm(settings.close_min)}</p>
+      <a class="btn small ghost" href="https://yandex.ru/maps/?text=${encodeURIComponent(settings.address)}" target="_blank" rel="noopener">Открыть на карте</a></div>
+    <div class="card"><h3>📲 Запись и расчёт стоимости</h3>
+      ${TG.map(([u, n]) => `<div>Telegram <a href="https://t.me/${u}" target="_blank" rel="noopener">@${u}</a> (${n})</div>`).join('')}
+      <div style="margin-top:6px">Телефон <a href="tel:${tel()}">${esc(settings.phone)}</a></div></div>
+    <div class="card"><h3>📣 Наш канал</h3><div class="muted">Работы, акции и новости</div>
+      <a class="btn small" style="margin-top:10px" href="${TG_CHANNEL}" target="_blank" rel="noopener">t.me/DNADetailing</a></div>
   </div>`;
 };
 
