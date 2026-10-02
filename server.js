@@ -78,6 +78,31 @@ const orderCols = db.prepare('PRAGMA table_info(orders)').all().map((c) => c.nam
 for (const [col, def] of [['car_make', "TEXT NOT NULL DEFAULT ''"], ['car_model', "TEXT NOT NULL DEFAULT ''"], ['plate', "TEXT NOT NULL DEFAULT ''"]]) {
   if (!orderCols.includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} ${def}`);
 }
+if (!orderCols.includes('reminded')) db.exec('ALTER TABLE orders ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0');
+const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+if (!userCols.includes('tg_chat_id')) db.exec('ALTER TABLE users ADD COLUMN tg_chat_id INTEGER');
+if (!userCols.includes('tg_token')) db.exec('ALTER TABLE users ADD COLUMN tg_token TEXT');
+db.exec(`
+CREATE TABLE IF NOT EXISTS reviews (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  order_id INTEGER UNIQUE REFERENCES orders(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  car TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  source TEXT NOT NULL DEFAULT '',
+  approved INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS works (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  before_img TEXT NOT NULL DEFAULT '',
+  after_img TEXT NOT NULL,
+  sort INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);`);
 
 // ---------- helpers ----------
 function hashPassword(pw) {
@@ -214,6 +239,7 @@ const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '50kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(path.join(DATA_DIR, 'uploads'), { maxAge: '30d' }));
 
 function parseCookies(h = '') {
   return Object.fromEntries(h.split(';').map((c) => c.trim().split('=')).filter((p) => p[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
@@ -309,7 +335,9 @@ app.post('/api/leads', h((req) => {
   const name = str(req.body.name, 80);
   const phone = normPhone(req.body.phone);
   if (!name || !phone) throw new HttpError(400, 'Укажите имя и корректный телефон');
-  db.prepare('INSERT INTO leads(name,phone,message) VALUES(?,?,?)').run(name, phone, str(req.body.message, 500));
+  const message = str(req.body.message, 500);
+  db.prepare('INSERT INTO leads(name,phone,message) VALUES(?,?,?)').run(name, phone, message);
+  notifyAdmins(`📞 <b>Заявка на звонок</b>\n👤 ${tgEsc(name)} ${phone}${message ? '\n💬 ' + tgEsc(message) : ''}`);
 }));
 
 // --- orders ---
@@ -346,17 +374,21 @@ function withServices(rows) {
 }
 const ORDER_SELECT = 'SELECT o.*, w.name AS worker_name FROM orders o LEFT JOIN users w ON w.id=o.worker_id';
 
-app.post('/api/orders', need(), h((req) => createOrder(req.body, {
-  userId: req.user.id, clientName: req.user.name, clientPhone: req.user.phone, adminMode: false,
-})));
+app.post('/api/orders', need(), h((req) => {
+  const r = createOrder(req.body, { userId: req.user.id, clientName: req.user.name, clientPhone: req.user.phone, adminMode: false });
+  const o = db.prepare('SELECT * FROM orders WHERE id=?').get(r.id);
+  notifyAdmins(`🆕 <b>Новая онлайн-запись</b>\n👤 ${tgEsc(o.client_name)} ${o.client_phone}\n${orderText(o)}${o.comment ? '\n💬 ' + tgEsc(o.comment) : ''}`);
+  return r;
+}));
 app.get('/api/orders/my', need(), h((req) => withServices(
-  db.prepare(`${ORDER_SELECT} WHERE o.user_id=? ORDER BY o.date DESC, o.start_min DESC`).all(req.user.id)
+  db.prepare(`SELECT o.*, w.name AS worker_name, (SELECT 1 FROM reviews r WHERE r.order_id=o.id) AS has_review FROM orders o LEFT JOIN users w ON w.id=o.worker_id WHERE o.user_id=? ORDER BY o.date DESC, o.start_min DESC`).all(req.user.id)
 )));
 app.post('/api/orders/:id/cancel', need(), h((req) => {
   const o = db.prepare('SELECT * FROM orders WHERE id=? AND user_id=?').get(req.params.id, req.user.id);
   if (!o) throw new HttpError(404, 'Заказ не найден');
   if (!['new', 'confirmed'].includes(o.status)) throw new HttpError(400, 'Этот заказ уже нельзя отменить');
   db.prepare("UPDATE orders SET status='cancelled' WHERE id=?").run(o.id);
+  notifyAdmins(`❌ <b>Клиент отменил запись</b>\n👤 ${tgEsc(o.client_name)} ${o.client_phone}\n${orderText(o)}`);
 }));
 
 // --- staff (worker + admin) ---
@@ -376,6 +408,7 @@ app.patch('/api/staff/orders/:id', need('worker', 'admin'), h((req) => {
     const allowed = req.user.role === 'admin' ? ['new', 'confirmed', 'in_progress', 'done', 'cancelled'] : ['in_progress', 'done'];
     if (!allowed.includes(b.status)) throw new HttpError(400, 'Недопустимый статус');
     db.prepare('UPDATE orders SET status=? WHERE id=?').run(b.status, o.id);
+    if (b.status !== o.status) notifyClient(o.id, b.status);
   }
   if (b.take && req.user.role === 'worker') {
     if (o.worker_id && o.worker_id !== req.user.id) throw new HttpError(400, 'Заказ уже взят другим мастером');
@@ -528,6 +561,146 @@ app.put('/api/admin/settings', need('admin'), h((req) => {
   if (+vals.open_min >= +vals.close_min) throw new HttpError(400, 'Время открытия должно быть раньше закрытия');
   const up = db.prepare('UPDATE settings SET value=? WHERE key=?');
   tx(() => { for (const [k, v] of Object.entries(vals)) up.run(v, k); });
+}));
+
+// ---------- Telegram-бот: напоминания клиентам и уведомления админам ----------
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const SITE_URL = process.env.SITE_URL || '';
+let tgBot = '';
+const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const ruDate = (d) => new Date(d + 'T00:00:00Z').toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+async function tg(method, body) {
+  if (!TG_TOKEN) return null;
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(65000),
+    });
+    const j = await r.json();
+    if (!j.ok) console.error('telegram', method, j.description);
+    return j.ok ? j.result : null;
+  } catch (e) { console.error('telegram', method, e.message); return null; }
+}
+const tgSend = (chatId, text) => chatId && tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true });
+const tgEsc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+function notifyAdmins(text) {
+  for (const a of db.prepare("SELECT tg_chat_id FROM users WHERE role='admin' AND tg_chat_id IS NOT NULL").all()) tgSend(a.tg_chat_id, text);
+}
+function orderText(o) {
+  const sv = db.prepare('SELECT name FROM order_services WHERE order_id=?').all(o.id).map((x) => x.name).join(', ');
+  return `📅 ${ruDate(o.date)}, ${hhmm(o.start_min)}–${hhmm(o.end_min)}\n🚗 ${tgEsc(o.car)}${o.plate ? ' · ' + o.plate : ''}\n🧽 ${tgEsc(sv)}`;
+}
+function notifyClient(orderId, kind) {
+  const o = db.prepare('SELECT o.*, u.tg_chat_id FROM orders o JOIN users u ON u.id=o.user_id WHERE o.id=?').get(orderId);
+  if (!o?.tg_chat_id) return;
+  const addr = getSettings().address;
+  const msg = {
+    confirmed: `✅ <b>Запись подтверждена</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}`,
+    done: `🎉 <b>Ваш автомобиль готов!</b>\n🚗 ${tgEsc(o.car)}\nБудем рады отзыву${SITE_URL ? ` в личном кабинете: ${SITE_URL}/#/my` : ' в личном кабинете на сайте'}`,
+    cancelled: `❌ Запись отменена\n${orderText(o)}`,
+    reminder: `⏰ <b>Напоминаем о записи в D.N.A. Detailing</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}\n\nЕсли планы изменились — отмените запись в личном кабинете или напишите нам.`,
+  }[kind];
+  if (msg) tgSend(o.tg_chat_id, msg);
+}
+async function tgPoll() {
+  let offset = 0;
+  for (;;) {
+    const ups = await tg('getUpdates', { offset, timeout: 50, allowed_updates: ['message'] });
+    if (!ups) { await new Promise((r) => setTimeout(r, 10000)); continue; }
+    for (const u of ups) {
+      offset = u.update_id + 1;
+      const m = u.message;
+      if (!m?.text) continue;
+      const token = m.text.match(/^\/start\s+(\w+)/)?.[1];
+      const user = token && db.prepare('SELECT * FROM users WHERE tg_token=?').get(token);
+      if (user) {
+        db.prepare('UPDATE users SET tg_chat_id=NULL WHERE tg_chat_id=?').run(m.chat.id);
+        db.prepare('UPDATE users SET tg_chat_id=? WHERE id=?').run(m.chat.id, user.id);
+        tgSend(m.chat.id, user.role === 'admin'
+          ? `Готово, ${tgEsc(user.name)}! Сюда будут приходить новые записи, заявки и отзывы.`
+          : `Готово, ${tgEsc(user.name)}! Мы пришлём напоминание за день до визита и сообщим, когда авто будет готово.`);
+      } else {
+        tgSend(m.chat.id, `Здравствуйте! Это бот D.N.A. Detailing.\nЧтобы получать напоминания о записи, нажмите «Подключить Telegram» в личном кабинете на сайте${SITE_URL ? ': ' + SITE_URL : ''}.\n📲 Запись: ${tgEsc(getSettings().phone)}`);
+      }
+    }
+  }
+}
+function sendReminders() {
+  const today = todayStr();
+  const tomorrow = new Date(Date.parse(today + 'T00:00:00Z') + 864e5).toISOString().slice(0, 10);
+  const now = nowMin();
+  // все записи, до которых меньше суток; свежие (созданные < 2 ч назад) не беспокоим
+  const due = db.prepare(`SELECT o.id FROM orders o JOIN users u ON u.id=o.user_id
+    WHERE o.reminded=0 AND o.status IN ('new','confirmed') AND u.tg_chat_id IS NOT NULL
+      AND o.created_at < datetime('now','-2 hours')
+      AND ((o.date=? AND o.start_min>?) OR (o.date=? AND o.start_min<=?))`).all(today, now, tomorrow, now);
+  for (const { id } of due) {
+    db.prepare('UPDATE orders SET reminded=1 WHERE id=?').run(id);
+    notifyClient(id, 'reminder');
+  }
+}
+if (TG_TOKEN) {
+  tg('getMe').then((me) => { if (me) { tgBot = me.username; console.log('Telegram-бот: @' + tgBot); tgPoll(); } });
+  setInterval(sendReminders, 5 * 60e3);
+}
+app.get('/api/me/telegram', need(), h((req) => {
+  if (!tgBot) return { enabled: false };
+  let u = db.prepare('SELECT tg_token, tg_chat_id FROM users WHERE id=?').get(req.user.id);
+  if (!u.tg_token) {
+    const t = crypto.randomBytes(12).toString('hex');
+    db.prepare('UPDATE users SET tg_token=? WHERE id=?').run(t, req.user.id);
+    u = { ...u, tg_token: t };
+  }
+  return { enabled: true, linked: !!u.tg_chat_id, link: `https://t.me/${tgBot}?start=${u.tg_token}` };
+}));
+app.delete('/api/me/telegram', need(), h((req) => { db.prepare('UPDATE users SET tg_chat_id=NULL WHERE id=?').run(req.user.id); }));
+
+// ---------- отзывы ----------
+app.get('/api/reviews', h(() => db.prepare('SELECT id,name,car,text,rating,source,created_at FROM reviews WHERE approved=1 ORDER BY id DESC LIMIT 30').all()));
+app.post('/api/reviews', need(), h((req) => {
+  const o = db.prepare("SELECT * FROM orders WHERE id=? AND user_id=? AND status='done'").get(Number(req.body.order_id), req.user.id);
+  if (!o) throw new HttpError(400, 'Отзыв можно оставить после выполненного заказа');
+  if (db.prepare('SELECT 1 FROM reviews WHERE order_id=?').get(o.id)) throw new HttpError(400, 'Отзыв на этот заказ уже есть');
+  const rating = Math.round(Number(req.body.rating));
+  const text = str(req.body.text, 1500);
+  if (!(rating >= 1 && rating <= 5)) throw new HttpError(400, 'Поставьте оценку от 1 до 5');
+  if (text.length < 5) throw new HttpError(400, 'Напишите пару слов');
+  db.prepare('INSERT INTO reviews(user_id,order_id,name,car,text,rating) VALUES(?,?,?,?,?,?)').run(req.user.id, o.id, req.user.name, o.car, text, rating);
+  notifyAdmins(`⭐ <b>Новый отзыв (${rating}/5)</b> — ждёт одобрения\n${tgEsc(req.user.name)}, ${tgEsc(o.car)}\n«${tgEsc(text)}»`);
+}));
+app.get('/api/admin/reviews', need('admin'), h(() => db.prepare('SELECT * FROM reviews ORDER BY approved, id DESC').all()));
+app.post('/api/admin/reviews', need('admin'), h((req) => {
+  const name = str(req.body.name, 80), text = str(req.body.text, 1500);
+  const rating = Math.round(Number(req.body.rating));
+  if (!name || !text || !(rating >= 1 && rating <= 5)) throw new HttpError(400, 'Заполните имя, текст и оценку 1–5');
+  db.prepare('INSERT INTO reviews(name,car,text,rating,source,approved) VALUES(?,?,?,?,?,1)').run(name, str(req.body.car, 120), text, rating, str(req.body.source, 40));
+}));
+app.patch('/api/admin/reviews/:id', need('admin'), h((req) => { db.prepare('UPDATE reviews SET approved=? WHERE id=?').run(req.body.approved ? 1 : 0, req.params.id); }));
+app.delete('/api/admin/reviews/:id', need('admin'), h((req) => { db.prepare('DELETE FROM reviews WHERE id=?').run(req.params.id); }));
+
+// ---------- галерея «до/после» ----------
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const IMG_URL = /^\/uploads\/[a-f0-9]{24}\.(jpg|png|webp)$/;
+const IMG_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+app.post('/api/admin/upload', need('admin'), express.raw({ type: Object.keys(IMG_TYPES), limit: '10mb' }), h((req) => {
+  const ext = IMG_TYPES[req.headers['content-type']];
+  if (!ext || !Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Нужна картинка JPG, PNG или WebP');
+  const name = crypto.randomBytes(12).toString('hex') + '.' + ext;
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), req.body);
+  return { url: '/uploads/' + name };
+}));
+app.get('/api/works', h(() => db.prepare('SELECT id,title,before_img,after_img FROM works ORDER BY sort, id DESC').all()));
+app.post('/api/admin/works', need('admin'), h((req) => {
+  const { before_img: b = '', after_img: a } = req.body;
+  if (!IMG_URL.test(a || '') || (b && !IMG_URL.test(b))) throw new HttpError(400, 'Загрузите фото «после» (и по желанию «до»)');
+  db.prepare('INSERT INTO works(title,before_img,after_img,sort) VALUES(?,?,?,?)').run(str(req.body.title, 120), b, a, Math.round(Number(req.body.sort) || 0));
+}));
+app.delete('/api/admin/works/:id', need('admin'), h((req) => {
+  const w = db.prepare('SELECT * FROM works WHERE id=?').get(req.params.id);
+  if (!w) return;
+  for (const u of [w.before_img, w.after_img]) if (IMG_URL.test(u)) fs.rmSync(path.join(UPLOAD_DIR, path.basename(u)), { force: true });
+  db.prepare('DELETE FROM works WHERE id=?').run(w.id);
 }));
 
 app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Не найдено')));

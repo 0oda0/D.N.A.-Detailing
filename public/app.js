@@ -47,7 +47,9 @@ function renderNav() {
   } else links.push(['#/login', 'Вход'], ['#/register', 'Регистрация']);
   document.getElementById('nav').innerHTML =
     links.map(([h, t]) => `<a href="${h}" class="${r === h ? 'active' : ''}">${t}</a>`).join('') +
-    (me ? `<button id="logout" title="${esc(me.phone)}">Выйти (${esc(me.name)})</button>` : '');
+    (me ? `<button id="logout" title="${esc(me.phone)}">Выйти (${esc(me.name)})</button>` : '') +
+    `<button class="theme-btn" id="theme" title="${THEMES[getTheme()][1]}">${THEMES[getTheme()][0]}</button>`;
+  document.getElementById('theme').onclick = () => { setTheme(nextTheme[getTheme()]); renderNav(); toast(THEMES[getTheme()][1]); };
   const lo = document.getElementById('logout');
   if (lo) lo.onclick = async () => { await api('/api/logout', {}); me = null; location.hash = '#/'; route(); };
   document.getElementById('foot-contacts').innerHTML = settings
@@ -119,6 +121,7 @@ pages['/'] = () => {
       </div>`).join('')}
     </div>
   </section>
+  <div id="works-sec"></div>
 
   <section class="card calc reveal" id="calc">
     <h2>Калькулятор</h2>
@@ -139,6 +142,7 @@ pages['/'] = () => {
     <a class="btn ghost" href="${tg}" target="_blank" rel="noopener">Заказать выезд</a>
   </div>
 
+  <div id="reviews-sec"></div>
   <section class="reveal"><h2>Частые вопросы</h2>
     <div class="faq">${FAQ.map(([q, a]) => `<details class="card"><summary>${q}</summary><div class="muted">${a}</div></details>`).join('')}</div>
   </section>
@@ -181,6 +185,7 @@ pages['/'] = () => {
     try { await api('/api/leads', formData(e.target)); e.target.reset(); toast('Спасибо! Скоро перезвоним.'); }
     catch (er) { toast(er.message, 1); }
   };
+  homeExtras();
   const io = new IntersectionObserver((es) => es.forEach((x) => x.isIntersecting && (x.target.classList.add('in'), io.unobserve(x.target))), { threshold: 0.08 });
   $app.querySelectorAll('.reveal').forEach((el) => io.observe(el));
 };
@@ -376,8 +381,10 @@ pages['/my'] = async () => {
   const orders = await api('/api/orders/my');
   $app.innerHTML = `<h1>Мои заказы</h1>
     <p><a class="btn" href="#/book">+ Новая запись</a></p>
+    <div id="tg-box"></div>
     <div class="steps">${orders.length ? orders.map((o) => `<div class="card">${orderLine(o)}
-      ${['new', 'confirmed'].includes(o.status) ? `<button class="btn small ghost" data-cancel="${o.id}" style="margin-top:10px">Отменить</button>` : ''}</div>`).join('')
+      ${['new', 'confirmed'].includes(o.status) ? `<button class="btn small ghost" data-cancel="${o.id}" style="margin-top:10px">Отменить</button>` : ''}
+      ${o.status === 'done' && !o.has_review ? `<div data-review="${o.id}" style="margin-top:10px"><button class="btn small ghost">⭐ Оставить отзыв</button></div>` : ''}</div>`).join('')
       : '<div class="empty">Заказов пока нет</div>'}</div>
     <details class="card" style="margin-top:24px"><summary>Сменить пароль</summary>
       <form id="pw" class="form" style="margin:0"><label>Старый пароль</label><input name="old" type="password" required>
@@ -391,6 +398,8 @@ pages['/my'] = async () => {
     e.preventDefault();
     try { await api('/api/me/password', formData(e.target)); toast('Пароль изменён'); e.target.reset(); } catch (er) { toast(er.message, 1); }
   };
+  $app.querySelectorAll('[data-review]').forEach((b) => (b.querySelector('button').onclick = () => reviewForm(b, Number(b.dataset.review))));
+  tgCard(document.getElementById('tg-box'), 'Напомним о записи за день до визита и сообщим, когда автомобиль будет готов.');
 };
 
 // Список заказов для мастера/админа
@@ -456,19 +465,22 @@ pages['/staff'] = async () => {
 
 // ---------- admin ----------
 const adminTabs = {
-  orders: ['Заказы', (c) => ordersBoard(c, { admin: true })],
+  orders: ['📋 Заказы', (c) => ordersBoard(c, { admin: true })],
+  create: ['➕ Новый заказ', (c) => bookingForm(c, { admin: true, onDone: () => { toast('Заказ создан'); location.hash = '#/admin?tab=orders'; } })],
   reports: ['📊 Отчёты', adminReports],
-  create: ['+ Новый заказ', (c) => bookingForm(c, { admin: true, onDone: () => { toast('Заказ создан'); location.hash = '#/admin?tab=orders'; } })],
-  leads: ['Заявки', adminLeads],
-  services: ['Услуги', adminServices],
-  users: ['Пользователи', adminUsers],
-  settings: ['Настройки', adminSettings],
+  leads: ['📞 Заявки', adminLeads],
+  reviews: ['⭐ Отзывы', adminReviews],
+  works: ['🖼 Наши работы', adminWorks],
+  services: ['🧽 Услуги', adminServices],
+  users: ['👥 Пользователи', adminUsers],
+  settings: ['⚙️ Настройки', adminSettings],
 };
 pages['/admin'] = async () => {
   if (!me || me.role !== 'admin') return (location.hash = '#/login');
   const tab = new URLSearchParams(location.hash.split('?')[1] || '').get('tab') || 'orders';
-  $app.innerHTML = `<h1>Админ-панель</h1><div class="tabs">${Object.entries(adminTabs).map(([k, [t]]) =>
-    `<button class="${k === tab ? 'on' : ''}" onclick="location.hash='#/admin?tab=${k}'">${t}</button>`).join('')}</div><div id="tab"></div>`;
+  $app.innerHTML = `<div class="admin">
+    <aside class="side">${Object.entries(adminTabs).map(([k, [t]]) => `<a href="#/admin?tab=${k}" class="${k === tab ? 'on' : ''}">${t}</a>`).join('')}</aside>
+    <div class="admin-main"><h1>${(adminTabs[tab] || adminTabs.orders)[0].replace(/^\S+\s/, '')}</h1><div id="tab"></div></div></div>`;
   await (adminTabs[tab] || adminTabs.orders)[1](document.getElementById('tab'));
 };
 
@@ -527,6 +539,11 @@ async function adminUsers(c) {
 }
 
 async function adminSettings(c) {
+  await adminSettingsForm(c);
+  const box = document.createElement('div'); c.prepend(box);
+  tgCard(box, 'Сюда будут приходить новые онлайн-записи, заявки на звонок, отмены и отзывы.');
+}
+async function adminSettingsForm(c) {
   const s = await api('/api/settings');
   const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
   c.innerHTML = `<form class="card form" id="sf" style="margin:0">
@@ -689,11 +706,173 @@ let carsPromise;
 const loadCars = () => (carsPromise ||= fetch('/cars.json').then((r) => r.json()).catch(() => []));
 const findMake = (cars, v) => { const s = v.trim().toLowerCase(); return s && cars.find((m) => m[0].toLowerCase() === s || (m[1] && m[1].toLowerCase() === s)); };
 
+// ---------- тема: как в системе / светлая / тёмная ----------
+const THEMES = { auto: ['🖥', 'Тема: как в системе'], light: ['☀️', 'Тема: светлая'], dark: ['🌙', 'Тема: тёмная'] };
+const getTheme = () => { try { return localStorage.getItem('theme') || 'auto'; } catch { return 'auto'; } };
+function setTheme(t) {
+  if (t === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t;
+  try { t === 'auto' ? localStorage.removeItem('theme') : localStorage.setItem('theme', t); } catch {}
+}
+const nextTheme = { auto: 'light', light: 'dark', dark: 'auto' };
+
+// ---------- Telegram: подключение уведомлений ----------
+async function tgCard(box, text) {
+  const t = await api('/api/me/telegram').catch(() => ({ enabled: false }));
+  if (!t.enabled) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="card" style="margin:16px 0">
+    <h3>✈ Уведомления в Telegram</h3>
+    ${t.linked
+      ? `<div>✅ Telegram подключён. ${text}</div><button class="btn small ghost" id="tg-off" style="margin-top:10px">Отключить</button>`
+      : `<div class="muted">${text}</div><a class="btn small" style="margin-top:10px" href="${esc(t.link)}" target="_blank" rel="noopener" id="tg-on">Подключить Telegram</a>
+         <div class="muted" style="margin-top:6px">Откроется бот — нажмите «Start/Запустить», затем вернитесь сюда.</div>`}
+  </div>`;
+  const off = box.querySelector('#tg-off');
+  if (off) off.onclick = async () => { await api('/api/me/telegram', undefined, 'DELETE'); tgCard(box, text); };
+  const on = box.querySelector('#tg-on');
+  if (on) on.onclick = () => setTimeout(function poll(n = 0) { tgCard(box, text).then(() => { if (n < 20 && box.querySelector('#tg-on')) setTimeout(() => poll(n + 1), 3000); }); }, 4000);
+}
+
+// ---------- изображения ----------
+// Сжимаем фото в браузере до 1600px, чтобы не грузить сервер многомегабайтными файлами
+function shrinkImage(file, max = 1600) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(img.src);
+      cv.toBlob((b) => (b ? resolve(b) : reject(new Error('Не удалось обработать фото'))), 'image/jpeg', 0.85);
+    };
+    img.onerror = () => reject(new Error('Это не картинка'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+async function uploadImage(file) {
+  const blob = await shrinkImage(file);
+  const r = await fetch('/api/admin/upload', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || 'Ошибка загрузки');
+  return d.url;
+}
+const stars = (n) => '★'.repeat(n) + '☆'.repeat(5 - n);
+function baSlider(w) {
+  if (!w.before_img) return `<div class="ba"><img src="${esc(w.after_img)}" alt="${esc(w.title)}" loading="lazy"></div>`;
+  return `<div class="ba"><img src="${esc(w.after_img)}" alt="После" loading="lazy"><img class="ba-before" src="${esc(w.before_img)}" alt="До" loading="lazy">
+    <span class="ba-tag" style="left:8px">До</span><span class="ba-tag" style="right:8px">После</span><div class="ba-line"></div>
+    <input type="range" min="0" max="100" value="50" aria-label="Сравнить до и после"></div>`;
+}
+function bindSliders(root) {
+  root.querySelectorAll('.ba input').forEach((r) => (r.oninput = () => {
+    const ba = r.closest('.ba');
+    ba.querySelector('.ba-before').style.clipPath = `inset(0 ${100 - r.value}% 0 0)`;
+    ba.querySelector('.ba-line').style.left = r.value + '%';
+  }));
+}
+async function homeExtras() {
+  const [works, reviews] = await Promise.all([api('/api/works').catch(() => []), api('/api/reviews').catch(() => [])]);
+  const ws = document.getElementById('works-sec'), rs = document.getElementById('reviews-sec');
+  if (ws && works.length) {
+    ws.innerHTML = `<section><h2>Наши работы</h2><p class="muted">Потяните ползунок, чтобы сравнить «до» и «после»</p>
+      <div class="grid">${works.map((w) => `<div class="card work">${baSlider(w)}${w.title ? `<h3>${esc(w.title)}</h3>` : ''}</div>`).join('')}</div>
+      <p><a class="btn ghost small" href="${TG_CHANNEL}" target="_blank" rel="noopener">Больше работ в Telegram-канале</a></p></section>`;
+    bindSliders(ws);
+  }
+  if (rs && reviews.length) {
+    const avg = (reviews.reduce((a, r) => a + r.rating, 0) / reviews.length).toFixed(1);
+    rs.innerHTML = `<section><h2>Отзывы <span class="stars" style="font-size:18px">★ ${avg}</span></h2>
+      <div class="grid">${reviews.slice(0, 9).map((r) => `<div class="card review"><div class="stars">${stars(r.rating)}</div><div>${esc(r.text)}</div>
+        <div class="muted"><span class="who">${esc(r.name)}</span>${r.car ? ' · ' + esc(r.car) : ''}${r.source ? ' · ' + esc(r.source) : ''}</div></div>`).join('')}</div></section>`;
+  }
+}
+
+// ---------- админка: галерея и отзывы ----------
+async function adminWorks(c) {
+  const works = await api('/api/works');
+  c.innerHTML = `<div class="card" style="margin-bottom:16px"><h3>Добавить работу</h3>
+      <p class="muted">Фото «до» необязательно. Большие фото автоматически сжимаются.</p>
+      <label>Название (например: «BMW X5 — полировка и керамика»)</label><input id="w-title" maxlength="120">
+      <div class="grid" style="margin-top:4px"><div><label>Фото «до»</label><input type="file" id="w-before" accept="image/*"></div>
+      <div><label>Фото «после» *</label><input type="file" id="w-after" accept="image/*"></div></div>
+      <button class="btn" id="w-add" style="margin-top:14px">Добавить</button></div>
+    ${works.length ? `<div class="grid">${works.map((w) => `<div class="card work">${baSlider(w)}<h3>${esc(w.title) || '<span class="muted">без названия</span>'}</h3>
+      <button class="btn small danger" data-del="${w.id}" style="margin-top:8px">Удалить</button></div>`).join('')}</div>` : '<div class="empty">Работ пока нет — они появятся на главной, как только добавите первую.</div>'}`;
+  bindSliders(c);
+  c.querySelector('#w-add').onclick = async (e) => {
+    const bf = c.querySelector('#w-before').files[0], af = c.querySelector('#w-after').files[0];
+    if (!af) return toast('Выберите фото «после»', 1);
+    e.target.disabled = true; e.target.textContent = 'Загружаю…';
+    try {
+      const [before_img, after_img] = await Promise.all([bf ? uploadImage(bf) : '', uploadImage(af)]);
+      await api('/api/admin/works', { title: c.querySelector('#w-title').value, before_img, after_img });
+      toast('Работа добавлена'); adminWorks(c);
+    } catch (er) { toast(er.message, 1); e.target.disabled = false; e.target.textContent = 'Добавить'; }
+  };
+  c.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Удалить работу вместе с фото?')) return;
+    await api(`/api/admin/works/${b.dataset.del}`, undefined, 'DELETE'); adminWorks(c);
+  }));
+}
+async function adminReviews(c) {
+  const list = await api('/api/admin/reviews');
+  c.innerHTML = `<details class="card" style="margin-bottom:16px"><summary><b>+ Добавить отзыв вручную</b> <span class="muted">(например, с Авито или Яндекс Карт)</span></summary>
+      <form id="rf" class="form" style="margin:0;max-width:520px"><label>Имя</label><input name="name" required maxlength="80">
+      <label>Авто</label><input name="car" maxlength="120"><label>Источник</label><input name="source" maxlength="40" placeholder="Авито, Яндекс Карты, Telegram…">
+      <label>Оценка</label><select name="rating">${[5, 4, 3, 2, 1].map((n) => `<option value="${n}">${stars(n)}</option>`).join('')}</select>
+      <label>Текст</label><textarea name="text" required maxlength="1500"></textarea><button class="btn" style="margin-top:12px">Добавить</button></form></details>
+    ${list.length ? `<div class="steps">${list.map((r) => `<div class="card review" style="${r.approved ? '' : 'border-color:var(--warn)'}">
+      <div><span class="stars">${stars(r.rating)}</span> ${r.approved ? '<span class="badge st-done">Опубликован</span>' : '<span class="badge st-new">Ждёт одобрения</span>'}</div>
+      <div>${esc(r.text)}</div><div class="muted">${esc(r.name)}${r.car ? ' · ' + esc(r.car) : ''}${r.source ? ' · ' + esc(r.source) : ''} · ${esc(r.created_at.slice(0, 10))}</div>
+      <div><button class="btn small ${r.approved ? 'ghost' : ''}" data-ap="${r.id}" data-v="${r.approved ? 0 : 1}">${r.approved ? 'Скрыть' : 'Опубликовать'}</button>
+        <button class="btn small danger" data-del="${r.id}">Удалить</button></div></div>`).join('')}</div>`
+      : '<div class="empty">Отзывов пока нет. Клиенты могут оставить отзыв в личном кабинете после выполненного заказа.</div>'}`;
+  c.querySelector('#rf').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/api/admin/reviews', formData(e.target)); toast('Отзыв добавлен'); adminReviews(c); } catch (er) { toast(er.message, 1); }
+  };
+  c.querySelectorAll('[data-ap]').forEach((b) => (b.onclick = async () => { await api(`/api/admin/reviews/${b.dataset.ap}`, { approved: b.dataset.v === '1' }, 'PATCH'); adminReviews(c); }));
+  c.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { if (confirm('Удалить отзыв?')) { await api(`/api/admin/reviews/${b.dataset.del}`, undefined, 'DELETE'); adminReviews(c); } }));
+}
+function reviewForm(box, orderId) {
+  let rating = 5;
+  box.innerHTML = `<div class="rate-pick">${[1, 2, 3, 4, 5].map((n) => `<button type="button" data-r="${n}" class="on">★</button>`).join('')}</div>
+    <textarea placeholder="Как вам результат?" maxlength="1500"></textarea>
+    <button class="btn small" style="margin-top:8px">Отправить отзыв</button>`;
+  const paint = () => box.querySelectorAll('[data-r]').forEach((b) => b.classList.toggle('on', Number(b.dataset.r) <= rating));
+  box.querySelectorAll('[data-r]').forEach((b) => (b.onclick = () => { rating = Number(b.dataset.r); paint(); }));
+  box.querySelector('.btn').onclick = async () => {
+    try { await api('/api/reviews', { order_id: orderId, rating, text: box.querySelector('textarea').value }); box.innerHTML = '<div>Спасибо за отзыв! Он появится на сайте после проверки.</div>'; }
+    catch (e) { toast(e.message, 1); }
+  };
+}
+
+// ---------- «Заказать звонок?» у кнопки телефона ----------
+function callBubble() {
+  const b = document.createElement('div');
+  b.className = 'call-bubble'; b.textContent = 'Заказать звонок?';
+  b.onclick = () => {
+    b.classList.remove('show');
+    if ((location.hash.slice(1) || '/').split('?')[0] !== '/') { location.hash = '#/'; setTimeout(() => scrollTo('lead'), 400); } else scrollTo('lead');
+    setTimeout(() => document.querySelector('#lf [name=name]')?.focus(), 700);
+  };
+  document.body.appendChild(b);
+  const show = () => {
+    const home = (location.hash.slice(1) || '/').split('?')[0] === '/';
+    if (!home || document.hidden) return;
+    b.classList.add('show');
+    setTimeout(() => b.classList.remove('show'), 5000);
+  };
+  setTimeout(show, 20000);   // первый раз — через 20 секунд на сайте
+  setInterval(show, 120000); // дальше — раз в 2 минуты
+}
+
 // ---------- router ----------
 async function refreshServices() { services = await api('/api/services'); }
 async function route() {
   const path = (location.hash.slice(1) || '/').split('?')[0];
   renderNav();
+  document.body.classList.toggle('wide', path === '/admin');
   try { await (pages[path] || pages['/'])(); } catch (e) { $app.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   window.scrollTo(0, 0);
 }
@@ -712,5 +891,6 @@ function floatButtons() {
   [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
   await refreshServices();
   floatButtons();
+  callBubble();
   route();
 })();

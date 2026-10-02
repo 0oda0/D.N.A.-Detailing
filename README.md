@@ -30,3 +30,16 @@ bash deploy/install.sh
 Если репозиторий приватный — `git clone` попросит GitHub-токен, либо скопируйте папку: `scp -r . root@IP:/root/dna`.
 
 Когда появится домен: поставить nginx + certbot перед приложением (PORT=3000 в `.env`) и добавить `COOKIE_SECURE=1`.
+
+## Telegram-бот (напоминания клиентам и уведомления админу)
+1. В Telegram откройте @BotFather → `/newbot` → придумайте имя → получите токен.
+2. На сервере:
+   ```bash
+   echo "TELEGRAM_BOT_TOKEN=ВАШ_ТОКЕН" >> /opt/dna-detailing/.env
+   echo "SITE_URL=http://155.212.173.37:8080" >> /opt/dna-detailing/.env
+   systemctl restart dna-detailing
+   ```
+3. Админ: «Админка → Настройки → Подключить Telegram» — сюда приходят новые записи, заявки, отмены, отзывы.
+4. Клиент: «Мои заказы → Подключить Telegram» — напоминание за сутки до визита, «запись подтверждена», «авто готово».
+
+Фото работ хранятся в `/opt/dna-detailing/data/uploads/` — включайте эту папку в бэкап.
