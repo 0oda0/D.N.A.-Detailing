@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 
+// миграции: новые колонки для старых баз
+const orderCols = db.prepare('PRAGMA table_info(orders)').all().map((c) => c.name);
+for (const [col, def] of [['car_make', "TEXT NOT NULL DEFAULT ''"], ['car_model', "TEXT NOT NULL DEFAULT ''"], ['plate', "TEXT NOT NULL DEFAULT ''"]]) {
+  if (!orderCols.includes(col)) db.exec(`ALTER TABLE orders ADD COLUMN ${col} ${def}`);
+}
+
 // ---------- helpers ----------
 function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -89,6 +95,14 @@ function normPhone(p) {
   if (d.length === 11 && d[0] === '8') d = '7' + d.slice(1);
   if (d.length === 10) d = '7' + d;
   return d.length >= 10 && d.length <= 15 ? '+' + d : null;
+}
+// Госномер РФ: А123ВС77 / А123ВС777, латинские двойники приводим к кириллице
+const PLATE_LAT = { A: 'А', B: 'В', E: 'Е', K: 'К', M: 'М', H: 'Н', O: 'О', P: 'Р', C: 'С', T: 'Т', Y: 'У', X: 'Х' };
+function normPlate(p) {
+  if (!String(p || '').trim()) return '';
+  const v = String(p || '').toUpperCase().replace(/[A-Z]/g, (c) => PLATE_LAT[c] || c).replace(/[^0-9А-ЯЁ]/g, '');
+  if (!/^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}$/.test(v)) throw new HttpError(400, 'Госномер в формате А123ВС777');
+  return v;
 }
 function str(v, max = 200) {
   return String(v ?? '').trim().slice(0, max);
@@ -301,8 +315,10 @@ app.post('/api/leads', h((req) => {
 // --- orders ---
 function createOrder(body, { userId, clientName, clientPhone, adminMode }) {
   const services = pickServices(body.services);
-  const car = str(body.car, 120);
-  if (!car) throw new HttpError(400, 'Укажите марку и модель авто');
+  const make = str(body.car_make, 60), model = str(body.car_model, 60);
+  const plate = normPlate(body.plate);
+  const car = [make, model].filter(Boolean).join(' ') || str(body.car, 120);
+  if (!make && !car) throw new HttpError(400, 'Укажите марку и модель авто');
   const date = str(body.date, 10);
   const start = Number(body.start_min);
   const duration = services.reduce((a, s) => a + s.duration, 0);
@@ -317,8 +333,8 @@ function createOrder(body, { userId, clientName, clientPhone, adminMode }) {
       throw new HttpError(409, 'Это время уже занято — выберите другое');
     }
     const { lastInsertRowid: id } = db.prepare(
-      'INSERT INTO orders(user_id,client_name,client_phone,car,date,start_min,end_min,total_price,comment,status) VALUES(?,?,?,?,?,?,?,?,?,?)'
-    ).run(userId, clientName, clientPhone, car, date, start, start + duration, total, str(body.comment, 1000), adminMode ? 'confirmed' : 'new');
+      'INSERT INTO orders(user_id,client_name,client_phone,car,car_make,car_model,plate,date,start_min,end_min,total_price,comment,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(userId, clientName, clientPhone, car, make, model, plate, date, start, start + duration, total, str(body.comment, 1000), adminMode ? 'confirmed' : 'new');
     const ins = db.prepare('INSERT INTO order_services(order_id,service_id,name,duration,price) VALUES(?,?,?,?,?)');
     for (const s of services) ins.run(id, s.id, s.name, s.duration, s.price);
     return { id: Number(id) };
@@ -366,6 +382,11 @@ app.patch('/api/staff/orders/:id', need('worker', 'admin'), h((req) => {
     db.prepare('UPDATE orders SET worker_id=? WHERE id=?').run(req.user.id, o.id);
   }
   if (req.user.role === 'admin') {
+    if (b.total_price !== undefined) {
+      const tp = Math.round(Number(b.total_price));
+      if (!(tp >= 0)) throw new HttpError(400, 'Некорректная сумма');
+      db.prepare('UPDATE orders SET total_price=? WHERE id=?').run(tp, o.id);
+    }
     if (b.worker_id !== undefined) db.prepare('UPDATE orders SET worker_id=? WHERE id=?').run(b.worker_id ? Number(b.worker_id) : null, o.id);
     if (b.date !== undefined || b.start_min !== undefined) {
       const date = str(b.date ?? o.date, 10);
@@ -397,6 +418,73 @@ app.post('/api/admin/orders', need('admin'), h((req) => {
   return createOrder(req.body, { userId, clientName, clientPhone, adminMode: true });
 }));
 app.delete('/api/admin/orders/:id', need('admin'), h((req) => { db.prepare('DELETE FROM orders WHERE id=?').run(req.params.id); }));
+
+// --- отчёты ---
+function reportRange(q) {
+  const to = validDate(q.to) ? q.to : todayStr();
+  const from = validDate(q.from) ? q.from : new Date(Date.parse(to) - 29 * 864e5).toISOString().slice(0, 10);
+  if (from > to) throw new HttpError(400, 'Начало периода позже конца');
+  return [from, to];
+}
+app.get('/api/admin/reports', need('admin'), h((req) => {
+  const [from, to] = reportRange(req.query);
+  const all = (sql, ...a) => db.prepare(sql).all(from, to, ...a);
+  const one = (sql) => db.prepare(sql).get(from, to);
+  const R = "o.date BETWEEN ? AND ?";
+  const kpi = one(`SELECT
+      COUNT(*) AS orders,
+      SUM(status='done') AS done,
+      SUM(status='cancelled') AS cancelled,
+      COALESCE(SUM(CASE WHEN status='done' THEN total_price END),0) AS revenue,
+      COALESCE(SUM(CASE WHEN status IN ('new','confirmed','in_progress') THEN total_price END),0) AS pipeline,
+      COALESCE(SUM(CASE WHEN status!='cancelled' THEN end_min-start_min END),0) AS booked_min,
+      COUNT(DISTINCT CASE WHEN status!='cancelled' THEN client_phone END) AS clients
+    FROM orders o WHERE ${R}`);
+  kpi.avg_check = kpi.done ? Math.round(kpi.revenue / kpi.done) : 0;
+  // повторные клиенты: были заказы до начала периода
+  kpi.repeat_clients = db.prepare(`SELECT COUNT(DISTINCT client_phone) AS n FROM orders o WHERE ${R} AND status!='cancelled'
+    AND client_phone IN (SELECT client_phone FROM orders WHERE date < ? AND status!='cancelled')`).get(from, to, from).n;
+  kpi.new_users = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='client' AND date(created_at) BETWEEN ? AND ?").get(from, to).n;
+  kpi.leads = db.prepare('SELECT COUNT(*) AS n FROM leads WHERE date(created_at) BETWEEN ? AND ?').get(from, to).n;
+  // загрузка: занятые минуты / доступные (часы работы × боксы × рабочие дни)
+  const s = getSettings();
+  let workDays = 0;
+  for (let t = Date.parse(from); t <= Date.parse(to); t += 864e5) if (!s.days_off.includes(new Date(t).getUTCDay())) workDays++;
+  const capacityMin = workDays * (s.close_min - s.open_min) * s.capacity;
+  kpi.load_pct = capacityMin ? Math.round((kpi.booked_min / capacityMin) * 100) : 0;
+
+  return {
+    from, to, kpi,
+    by_day: all(`SELECT date,
+        COALESCE(SUM(CASE WHEN status='done' THEN total_price END),0) AS revenue,
+        SUM(status!='cancelled') AS orders
+      FROM orders o WHERE ${R} GROUP BY date ORDER BY date`),
+    services: all(`SELECT os.name, COUNT(*) AS n, SUM(os.price) AS sum FROM order_services os JOIN orders o ON o.id=os.order_id
+      WHERE ${R} AND o.status!='cancelled' GROUP BY os.name ORDER BY n DESC, sum DESC LIMIT 10`),
+    makes: all(`SELECT COALESCE(NULLIF(car_make,''), 'Не указана') AS name, COUNT(*) AS n FROM orders o
+      WHERE ${R} AND status!='cancelled' GROUP BY 1 ORDER BY n DESC LIMIT 10`),
+    statuses: all(`SELECT status, COUNT(*) AS n FROM orders o WHERE ${R} GROUP BY status`),
+    workers: all(`SELECT COALESCE(w.name,'Не назначен') AS name, SUM(o.status='done') AS done, COUNT(*) AS n,
+        COALESCE(SUM(CASE WHEN o.status='done' THEN o.total_price END),0) AS revenue
+      FROM orders o LEFT JOIN users w ON w.id=o.worker_id WHERE ${R} AND o.status!='cancelled' GROUP BY o.worker_id ORDER BY revenue DESC`),
+    weekdays: all(`SELECT CAST(strftime('%w', date) AS INTEGER) AS wd, COUNT(*) AS n FROM orders o WHERE ${R} AND status!='cancelled' GROUP BY wd`),
+  };
+}));
+const STATUS_RU = { new: 'Новый', confirmed: 'Подтверждён', in_progress: 'В работе', done: 'Готово', cancelled: 'Отменён' };
+app.get('/api/admin/reports.csv', need('admin'), (req, res, next) => {
+  try {
+    const [from, to] = reportRange(req.query);
+    const rows = withServices(db.prepare(`${ORDER_SELECT} WHERE o.date BETWEEN ? AND ? ORDER BY o.date, o.start_min`).all(from, to));
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    const lines = [['№', 'Дата', 'Начало', 'Конец', 'Клиент', 'Телефон', 'Марка', 'Модель', 'Госномер', 'Услуги', 'Сумма', 'Статус', 'Мастер', 'Комментарий'].map(q).join(';')];
+    for (const o of rows) lines.push([o.id, o.date, hhmm(o.start_min), hhmm(o.end_min), o.client_name, o.client_phone, o.car_make || o.car, o.car_model, o.plate,
+      o.services.map((x) => x.name).join(', '), o.total_price, STATUS_RU[o.status], o.worker_name, o.comment].map(q).join(';'));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="dna-orders-${from}_${to}.csv"`);
+    res.send('\ufeff' + lines.join('\r\n'));
+  } catch (e) { next(e); }
+});
 
 app.get('/api/admin/leads', need('admin'), h(() => db.prepare('SELECT * FROM leads ORDER BY done, id DESC LIMIT 500').all()));
 app.patch('/api/admin/leads/:id', need('admin'), h((req) => { db.prepare('UPDATE leads SET done=? WHERE id=?').run(req.body.done ? 1 : 0, req.params.id); }));

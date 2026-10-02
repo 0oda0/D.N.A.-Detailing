@@ -186,7 +186,7 @@ pages['/'] = () => {
 };
 
 // Компонент записи: услуги → авто → дата → свободное время. Используется клиентом и админом.
-const draft = { services: [], car: '', date: '', start: null, comment: '' };
+const draft = { services: [], car_make: '', car_model: '', plate: '', date: '', start: null, comment: '' };
 function bookingForm(container, { admin, onDone }) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   if (params.get('s')) draft.services = params.get('s').split(',').map(Number).filter((id) => services.some((x) => x.id === id));
@@ -204,8 +204,12 @@ function bookingForm(container, { admin, onDone }) {
         <label>Телефон</label><input id="b-cphone" type="tel" placeholder="+7…"></div>` : ''}
       <div class="card"><h3>1. Что сделать</h3><div class="grid" id="b-services"></div></div>
       <div class="card"><h3>2. Автомобиль</h3>
-        <label>Марка, модель, цвет, госномер</label>
-        <input id="b-car" maxlength="120" placeholder="BMW X3, чёрный, А123АА777" value="${esc(draft.car)}"></div>
+        <label>Марка</label>
+        <input id="b-make" list="b-makes" maxlength="60" autocomplete="off" placeholder="Начните вводить: BMW, Лада, Haval…" value="${esc(draft.car_make)}"><datalist id="b-makes"></datalist>
+        <label>Модель</label>
+        <input id="b-model" list="b-models" maxlength="60" autocomplete="off" placeholder="Выберите или впишите" value="${esc(draft.car_model)}"><datalist id="b-models"></datalist>
+        <label>Госномер (необязательно)</label>
+        <input id="b-plate" data-plate maxlength="12" autocomplete="off" placeholder="А 123 ВС 777" value="${esc(plateView(draft.plate))}" style="text-transform:uppercase;letter-spacing:1px"></div>
       <div class="card"><h3>3. Дата и время</h3>
         <label>Дата</label><input id="b-date" type="date" value="${draft.date}" ${admin ? '' : `min="${today()}"`}>
         <label>Свободное время</label><div class="slots" id="b-slots"></div>
@@ -274,7 +278,22 @@ function bookingForm(container, { admin, onDone }) {
     summary();
   }
 
-  q('b-car').oninput = (e) => (draft.car = e.target.value);
+  loadCars().then((cars) => {
+    const setModels = () => {
+      const m = findMake(cars, draft.car_make);
+      q('b-models').innerHTML = m ? m[3].map((x) => `<option value="${esc(x[0])}">${esc(x[1] || '')}</option>`).join('') : '';
+    };
+    q('b-makes').innerHTML = cars.map((m) => `<option value="${esc(m[0])}">${esc(m[1])}</option>`).join('');
+    setModels();
+    q('b-make').onchange = (e) => {
+      const m = findMake(cars, e.target.value);
+      if (m) e.target.value = m[0]; // кириллицу приводим к официальному названию
+      draft.car_make = e.target.value; draft.car_model = ''; q('b-model').value = ''; setModels();
+    };
+  });
+  q('b-make').oninput = (e) => (draft.car_make = e.target.value);
+  q('b-model').oninput = (e) => (draft.car_model = e.target.value);
+  q('b-plate').oninput = (e) => (draft.plate = plateRaw(e.target.value));
   q('b-comment').oninput = (e) => (draft.comment = e.target.value);
   q('b-date').onchange = (e) => { draft.date = e.target.value; draft.start = null; loadSlots(); };
   if (q('b-manual')) q('b-manual').onchange = (e) => {
@@ -286,10 +305,11 @@ function bookingForm(container, { admin, onDone }) {
   q('b-submit').onclick = async () => {
     const err = q('b-err'); err.textContent = '';
     if (!draft.services.length) return (err.textContent = 'Выберите услуги');
-    if (!draft.car.trim()) return (err.textContent = 'Укажите автомобиль');
+    if (!draft.car_make.trim()) return (err.textContent = 'Укажите марку автомобиля');
+    if (!plateOk(draft.plate)) return (err.textContent = 'Госномер в формате А 123 ВС 777');
     if (draft.start == null) return (err.textContent = 'Выберите время');
     if (!admin && !me) { toast('Войдите или зарегистрируйтесь — заказ сохранится'); location.hash = '#/login?next=book'; return; }
-    const body = { services: draft.services, car: draft.car, date: draft.date, start_min: draft.start, comment: draft.comment };
+    const body = { services: draft.services, car_make: draft.car_make, car_model: draft.car_model, plate: draft.plate, date: draft.date, start_min: draft.start, comment: draft.comment };
     if (admin) {
       const typed = q('b-user').value.trim();
       const u = typed && users.find((x) => `${x.name} ${x.phone}` === typed);
@@ -300,7 +320,7 @@ function bookingForm(container, { admin, onDone }) {
     q('b-submit').disabled = true;
     try {
       await api(admin ? '/api/admin/orders' : '/api/orders', body);
-      Object.assign(draft, { services: [], car: '', start: null, comment: '' });
+      Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', start: null, comment: '' });
       onDone();
     } catch (e) { err.textContent = e.message; loadSlots(); }
     finally { q('b-submit').disabled = false; }
@@ -341,10 +361,11 @@ function authPage(isReg) {
 pages['/login'] = () => authPage(false);
 pages['/register'] = () => authPage(true);
 
+const carLabel = (o) => esc(o.car) + (o.plate ? ` · <span class="plate">${esc(plateView(o.plate))}</span>` : '');
 function orderLine(o) {
   return `<div class="order">
     <div><b>${fmtDate(o.date)}, ${hm(o.start_min)}–${hm(o.end_min)}</b> ${badge(o.status)}</div>
-    <div>🚗 ${esc(o.car)}</div>
+    <div>🚗 ${carLabel(o)}</div>
     <div class="muted">${o.services.map((s) => esc(s.name)).join(', ')} · от ${rub(o.total_price)}</div>
     ${o.comment ? `<div class="muted">💬 ${esc(o.comment)}</div>` : ''}
   </div>`;
@@ -392,8 +413,8 @@ async function ordersBoard(container, { admin }) {
     list.innerHTML = `<table><thead><tr><th>Когда</th><th>Клиент / авто</th><th>Работы</th><th>Статус</th><th>Мастер</th>${admin ? '<th></th>' : ''}</tr></thead><tbody>
       ${orders.map((o) => `<tr>
         <td><b>${fmtDate(o.date)}</b><br>${hm(o.start_min)}–${hm(o.end_min)}</td>
-        <td>${esc(o.client_name)}<br><a href="tel:${esc(o.client_phone)}">${esc(o.client_phone)}</a><br>🚗 ${esc(o.car)}${o.comment ? `<br><span class="muted">💬 ${esc(o.comment)}</span>` : ''}</td>
-        <td>${o.services.map((s) => esc(s.name)).join('<br>')}<br><span class="price">${rub(o.total_price)}</span></td>
+        <td>${esc(o.client_name)}<br><a href="tel:${esc(o.client_phone)}">${esc(o.client_phone)}</a><br>🚗 ${carLabel(o)}${o.comment ? `<br><span class="muted">💬 ${esc(o.comment)}</span>` : ''}</td>
+        <td>${o.services.map((s) => esc(s.name)).join('<br>')}<br>${admin ? `<input type="number" min="0" step="100" value="${o.total_price}" data-price="${o.id}" title="Итоговая сумма, ₽" style="min-width:90px;max-width:120px">` : `<span class="price">${rub(o.total_price)}</span>`}</td>
         <td>${admin
           ? `<select data-status="${o.id}">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${k === o.status ? 'selected' : ''}>${v}</option>`).join('')}</select>`
           : `${badge(o.status)}<br>${o.status === 'new' || o.status === 'confirmed' ? `<button class="btn small" data-set="${o.id}" data-v="in_progress">Начать</button>` : ''}
@@ -406,6 +427,7 @@ async function ordersBoard(container, { admin }) {
       </tr>`).join('')}</tbody></table>`;
     const patch = async (id, body) => { try { await api(`/api/staff/orders/${id}`, body, 'PATCH'); toast('Сохранено'); } catch (e) { toast(e.message, 1); } reload(); };
     list.querySelectorAll('[data-status]').forEach((s) => (s.onchange = () => patch(s.dataset.status, { status: s.value })));
+    list.querySelectorAll('[data-price]').forEach((i) => (i.onchange = () => patch(i.dataset.price, { total_price: i.value })));
     list.querySelectorAll('[data-worker]').forEach((s) => (s.onchange = () => patch(s.dataset.worker, { worker_id: s.value || null })));
     list.querySelectorAll('[data-set]').forEach((b) => (b.onclick = () => patch(b.dataset.set, { status: b.dataset.v })));
     list.querySelectorAll('[data-take]').forEach((b) => (b.onclick = () => patch(b.dataset.take, { take: true })));
@@ -435,6 +457,7 @@ pages['/staff'] = async () => {
 // ---------- admin ----------
 const adminTabs = {
   orders: ['Заказы', (c) => ordersBoard(c, { admin: true })],
+  reports: ['📊 Отчёты', adminReports],
   create: ['+ Новый заказ', (c) => bookingForm(c, { admin: true, onDone: () => { toast('Заказ создан'); location.hash = '#/admin?tab=orders'; } })],
   leads: ['Заявки', adminLeads],
   services: ['Услуги', adminServices],
@@ -528,6 +551,143 @@ async function adminSettings(c) {
     } catch (er) { toast(er.message, 1); }
   };
 }
+
+// ---------- отчёты ----------
+const WD = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+const niceMax = (v) => { if (v <= 0) return 2; const p = 10 ** Math.floor(Math.log10(v)); const m = Math.ceil(v / p) * p; return m < 20 && m % 2 ? m + 1 : m; };
+const short = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1).replace('.0', '') + ' млн' : n >= 1e3 ? Math.round(n / 1e3) + ' тыс' : String(n));
+
+// Вертикальные столбцы (одна серия): [{label, value, tip}]
+function colChart(rows, fmt) {
+  const max = niceMax(Math.max(0, ...rows.map((r) => r.value)));
+  const every = Math.ceil(rows.length / 10);
+  return `<div class="cc">
+    <div class="cc-grid">${[1, 0.5, 0].map((f) => `<div style="bottom:${f * 100}%"><span>${short(max * f)}</span></div>`).join('')}</div>
+    <div class="cc-bars">${rows.map((r) => `<div class="cc-col" data-tip="${esc(r.tip)}"><div class="cc-bar" style="height:${(r.value / max) * 100}%"></div></div>`).join('')}</div>
+    <div class="cc-x">${rows.map((r, i) => `<span>${i % every === 0 ? esc(r.label) : ''}</span>`).join('')}</div>
+  </div>`;
+}
+// Горизонтальные полосы: [{name, value}]
+function barList(rows, fmt = String) {
+  if (!rows.length) return '<div class="empty">Нет данных за период</div>';
+  const max = Math.max(...rows.map((r) => r.value)) || 1;
+  return `<div class="bl">${rows.map((r) => `<div class="bl-row" data-tip="${esc(r.name)}: ${esc(fmt(r.value))}">
+    <span class="bl-name">${esc(r.name)}</span><span class="bl-track"><span class="bl-bar" style="width:${Math.max(2, (r.value / max) * 100)}%"></span></span><span class="bl-val">${esc(fmt(r.value))}</span></div>`).join('')}</div>`;
+}
+// подписываем все даты периода, при длинном периоде группируем по неделям
+function bucketDays(byDay, from, to) {
+  const map = Object.fromEntries(byDay.map((d) => [d.date, d]));
+  const days = [];
+  for (let t = Date.parse(from + 'T00:00:00Z'); t <= Date.parse(to + 'T00:00:00Z'); t += 864e5) {
+    const d = new Date(t).toISOString().slice(0, 10);
+    days.push({ date: d, revenue: map[d]?.revenue || 0, orders: map[d]?.orders || 0 });
+  }
+  const dm = (d) => d.slice(8, 10) + '.' + d.slice(5, 7);
+  if (days.length <= 45) return { unit: 'день', rows: days.map((d) => ({ ...d, label: dm(d.date), title: fmtDate(d.date) })) };
+  const weeks = [];
+  for (let i = 0; i < days.length; i += 7) {
+    const ch = days.slice(i, i + 7);
+    weeks.push({ label: dm(ch[0].date), title: `${dm(ch[0].date)}–${dm(ch.at(-1).date)}`, revenue: ch.reduce((a, d) => a + d.revenue, 0), orders: ch.reduce((a, d) => a + d.orders, 0) });
+  }
+  return { unit: 'неделя', rows: weeks };
+}
+
+async function adminReports(c) {
+  const st = adminReports.st ||= { preset: 30 };
+  const t = new Date();
+  const presets = [[7, '7 дней'], [30, '30 дней'], [90, '90 дней'], ['month', 'Этот месяц'], ['year', 'Этот год']];
+  if (st.preset !== 'custom') {
+    st.to = isoDate(t);
+    st.from = st.preset === 'month' ? isoDate(new Date(t.getFullYear(), t.getMonth(), 1))
+      : st.preset === 'year' ? isoDate(new Date(t.getFullYear(), 0, 1))
+      : isoDate(new Date(Date.now() - (st.preset - 1) * 864e5));
+  }
+  const r = await api(`/api/admin/reports?from=${st.from}&to=${st.to}`);
+  const k = r.kpi;
+  const b = bucketDays(r.by_day, r.from, r.to);
+  const statusMap = Object.fromEntries(r.statuses.map((s) => [s.status, s.n]));
+  const tile = (label, value, sub = '') => `<div class="kpi"><span>${label}</span><b>${value}</b>${sub ? `<em>${sub}</em>` : ''}</div>`;
+  c.innerHTML = `
+    <div class="toolbar">
+      <div class="tabs" style="margin:0">${presets.map(([v, l]) => `<button data-p="${v}" class="${st.preset === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div><label>С</label><input type="date" id="r-from" value="${r.from}"></div>
+      <div><label>По</label><input type="date" id="r-to" value="${r.to}"></div>
+      <a class="btn small ghost" style="align-self:end" href="/api/admin/reports.csv?from=${r.from}&to=${r.to}">⬇ Заказы в Excel (CSV)</a>
+    </div>
+    <div class="kpis">
+      ${tile('Выручка', rub(k.revenue), `${k.done || 0} выполненных заказов`)}
+      ${tile('Ожидается', rub(k.pipeline), 'новые, подтверждённые, в работе')}
+      ${tile('Средний чек', rub(k.avg_check))}
+      ${tile('Загрузка', k.load_pct + '%', `${dur(k.booked_min)} занято`)}
+      ${tile('Заказов', k.orders, `отмен: ${k.cancelled || 0} (${pct(k.cancelled, k.orders)}%)`)}
+      ${tile('Клиентов', k.clients, `повторных: ${k.repeat_clients} (${pct(k.repeat_clients, k.clients)}%)`)}
+      ${tile('Регистраций', k.new_users)}
+      ${tile('Заявок на звонок', k.leads)}
+    </div>
+    <div class="charts">
+      <div class="card"><h3>Выручка по ${b.unit === 'день' ? 'дням' : 'неделям'}</h3><div class="muted">Сумма выполненных заказов, ₽</div>
+        ${colChart(b.rows.map((d) => ({ label: d.label, value: d.revenue, tip: `${d.title}: ${rub(d.revenue)}` })))}</div>
+      <div class="card"><h3>Заказы по ${b.unit === 'день' ? 'дням' : 'неделям'}</h3><div class="muted">Без отменённых, по дате визита</div>
+        ${colChart(b.rows.map((d) => ({ label: d.label, value: d.orders, tip: `${d.title}: ${d.orders} заказ(ов)` })))}</div>
+      <div class="card"><h3>Популярные услуги</h3><div class="muted">Количество в заказах</div>
+        ${barList(r.services.map((s) => ({ name: s.name, value: s.n })))}</div>
+      <div class="card"><h3>Марки автомобилей</h3><div class="muted">Топ-10 по числу заказов</div>
+        ${barList(r.makes.map((m) => ({ name: m.name, value: m.n })))}</div>
+      <div class="card"><h3>Загрузка по дням недели</h3><div class="muted">Число заказов — где можно дать скидку на «пустые» дни</div>
+        ${colChart([1, 2, 3, 4, 5, 6, 0].map((d) => { const n = r.weekdays.find((w) => w.wd === d)?.n || 0; return { label: WD[d], value: n, tip: `${WD[d]}: ${n}` }; }))}</div>
+      <div class="card"><h3>Статусы заказов</h3>
+        ${barList(Object.keys(STATUS).map((s) => ({ name: STATUS[s], value: statusMap[s] || 0 })).filter((x) => x.value))}</div>
+    </div>
+    <div class="card" style="margin-top:14px"><h3>Мастера</h3><div class="table"><table><thead><tr><th>Мастер</th><th>Заказов</th><th>Выполнено</th><th>Выручка</th></tr></thead><tbody>
+      ${r.workers.map((w) => `<tr><td>${esc(w.name)}</td><td>${w.n}</td><td>${w.done}</td><td>${rub(w.revenue)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Нет данных</td></tr>'}</tbody></table></div></div>
+    <details class="card" style="margin-top:14px"><summary>Таблица по ${b.unit === 'день' ? 'дням' : 'неделям'}</summary><div class="table"><table><thead><tr><th>Период</th><th>Заказов</th><th>Выручка</th></tr></thead><tbody>
+      ${b.rows.filter((d) => d.orders || d.revenue).map((d) => `<tr><td>${esc(d.title)}</td><td>${d.orders}</td><td>${rub(d.revenue)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Нет данных</td></tr>'}</tbody></table></div></details>`;
+  c.querySelectorAll('[data-p]').forEach((btn) => (btn.onclick = () => { st.preset = isNaN(btn.dataset.p) ? btn.dataset.p : Number(btn.dataset.p); adminReports(c); }));
+  c.querySelector('#r-from').onchange = (e) => { st.preset = 'custom'; st.from = e.target.value; if (st.to < st.from) st.to = st.from; adminReports(c); };
+  c.querySelector('#r-to').onchange = (e) => { st.preset = 'custom'; st.to = e.target.value; if (st.from > st.to) st.from = st.to; adminReports(c); };
+}
+
+// общий тултип для графиков
+(() => {
+  const tip = document.createElement('div'); tip.id = 'ctip'; document.body.appendChild(tip);
+  document.addEventListener('mouseover', (e) => { const el = e.target.closest('[data-tip]'); tip.style.display = el ? 'block' : 'none'; if (el) tip.textContent = el.dataset.tip; });
+  document.addEventListener('mousemove', (e) => { tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + 'px'; tip.style.top = e.clientY - 36 + 'px'; });
+})();
+
+// ---------- маски ----------
+const PLATE_LAT = { A: 'А', B: 'В', E: 'Е', K: 'К', M: 'М', H: 'Н', O: 'О', P: 'Р', C: 'С', T: 'Т', Y: 'У', X: 'Х' };
+function plateRaw(v) {
+  const s = String(v).toUpperCase().replace(/[A-Z]/g, (ch) => PLATE_LAT[ch] || '').replace(/[^0-9АВЕКМНОРСТУХ]/g, '');
+  const pat = 'LDDDLLDDD'; let out = '';
+  for (const ch of s) { if (out.length >= 9) break; if (pat[out.length] === 'L' ? /\D/.test(ch) : /\d/.test(ch)) out += ch; }
+  return out;
+}
+const plateView = (r) => [r.slice(0, 1), r.slice(1, 4), r.slice(4, 6), r.slice(6)].filter(Boolean).join(' ');
+const plateOk = (r) => !r || /^[АВЕКМНОРСТУХ]\d{3}[АВЕКМНОРСТУХ]{2}\d{2,3}$/.test(r);
+function phoneView(v) {
+  let d = String(v).replace(/\D/g, '');
+  if (!d) return '';
+  if (d[0] === '8') d = '7' + d.slice(1); else if (d[0] !== '7') d = '7' + d;
+  d = d.slice(0, 11);
+  let s = '+7';
+  if (d.length > 1) s += ' (' + d.slice(1, 4);
+  if (d.length >= 4) s += ')';
+  if (d.length > 4) s += ' ' + d.slice(4, 7);
+  if (d.length > 7) s += '-' + d.slice(7, 9);
+  if (d.length > 9) s += '-' + d.slice(9, 11);
+  return s;
+}
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.matches('input[type=tel]') && !e.inputType?.startsWith('delete')) el.value = phoneView(el.value);
+  if (el.matches('input[data-plate]')) el.value = plateView(plateRaw(el.value));
+});
+
+// ---------- справочник авто (cars-base.ru) ----------
+let carsPromise;
+const loadCars = () => (carsPromise ||= fetch('/cars.json').then((r) => r.json()).catch(() => []));
+const findMake = (cars, v) => { const s = v.trim().toLowerCase(); return s && cars.find((m) => m[0].toLowerCase() === s || (m[1] && m[1].toLowerCase() === s)); };
 
 // ---------- router ----------
 async function refreshServices() { services = await api('/api/services'); }

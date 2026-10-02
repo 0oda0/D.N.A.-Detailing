@@ -107,3 +107,25 @@ section { margin-top: 40px; }
   .hero { padding: 32px 18px; }
   .hero .row .btn { width: 100%; }
 }
+.plate { display: inline-block; padding: 0 6px; border: 1px solid var(--muted); border-radius: 4px; font-weight: 600; letter-spacing: 1px; font-size: 13px; }
+.kpis { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); margin-bottom: 14px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; display: grid; gap: 2px; }
+.kpi span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.kpi b { font-size: 24px; } .kpi em { font-style: normal; color: var(--muted); font-size: 12px; }
+.charts { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
+.cc { position: relative; height: 200px; margin: 16px 0 0 56px; }
+.cc-grid > div { position: absolute; left: 0; right: 0; border-top: 1px solid var(--line); }
+.cc-grid span { position: absolute; left: -56px; top: -8px; width: 50px; white-space: nowrap; text-align: right; font-size: 11px; color: var(--muted); }
+.cc-bars { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 2px; }
+.cc-col { flex: 1; height: 100%; display: flex; align-items: flex-end; justify-content: center; cursor: default; }
+.cc-col:hover { background: rgba(255,255,255,.03); }
+.cc-bar { width: 100%; max-width: 24px; background: var(--blue); border-radius: 4px 4px 0 0; min-height: 0; }
+.cc-x { position: absolute; top: 100%; left: 0; right: 0; display: flex; gap: 2px; margin-top: 4px; }
+.cc-x span { flex: 1; font-size: 10px; color: var(--muted); text-align: center; white-space: nowrap; overflow: visible; }
+.charts .card { padding-bottom: 34px; }
+.bl { display: grid; gap: 8px; margin-top: 12px; }
+.bl-row { display: grid; grid-template-columns: minmax(90px, 38%) 1fr auto; gap: 10px; align-items: center; font-size: 13px; }
+.bl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-track { height: 12px; } .bl-bar { display: block; height: 100%; background: var(--blue); border-radius: 0 4px 4px 0; }
+.bl-val { color: var(--muted); min-width: 24px; text-align: right; }
+#ctip { position: fixed; display: none; pointer-events: none; z-index: 60; background: #0b0f15; border: 1px solid var(--line); padding: 6px 10px; border-radius: 8px; font-size: 13px; white-space: nowrap; }
