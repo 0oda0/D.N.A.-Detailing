@@ -118,6 +118,24 @@ CREATE TABLE IF NOT EXISTS works (
   sort INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`);
+// тип кузова и класс авто: в заказах, гараже; флаг «применять множитель» у услуг
+const addCol = (table, col, def) => {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+};
+addCol('orders', 'car_body', "TEXT NOT NULL DEFAULT ''");
+addCol('orders', 'car_class', "TEXT NOT NULL DEFAULT ''");
+addCol('orders', 'price_k', 'REAL NOT NULL DEFAULT 1');
+addCol('cars', 'body', "TEXT NOT NULL DEFAULT ''");
+addCol('cars', 'car_class', "TEXT NOT NULL DEFAULT ''");
+addCol('services', 'scaled', 'INTEGER NOT NULL DEFAULT 1');
+
+// ---------- справочник авто (тот же файл, что отдаётся сайту) ----------
+const CAR_DB = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'public', 'cars.json'), 'utf8')); } catch { return []; } })();
+function lookupClass(make, model) {
+  const m = CAR_DB.find((x) => x[0].toLowerCase() === make.toLowerCase() || (x[1] && x[1].toLowerCase() === make.toLowerCase()));
+  const md = m && m[3].find((x) => x[0].toLowerCase() === model.toLowerCase());
+  return md ? md[2] : '';
+}
 
 // ---------- helpers ----------
 function hashPassword(pw) {
@@ -164,6 +182,16 @@ const DEFAULT_SETTINGS = {
   booking_days: '60',
   address: 'г. Балашиха, ул. Свердлова, вл. 36',
   phone: '+7 (968) 610 77 99',
+  price_body: '{}',
+  price_class: '{}',
+};
+const BODY_TYPES = {
+  sedan: 'Седан', hatchback: 'Хэтчбек', liftback: 'Лифтбек', wagon: 'Универсал', coupe: 'Купе', cabrio: 'Кабриолет',
+  crossover: 'Кроссовер', suv: 'Внедорожник', minivan: 'Минивэн', pickup: 'Пикап', van: 'Фургон / микроавтобус',
+};
+const CAR_CLASSES = {
+  A: 'A — мини', B: 'B — малый', C: 'C — компактный (гольф)', D: 'D — средний', E: 'E — бизнес',
+  F: 'F — представительский', J: 'J — внедорожник / SUV', M: 'M — минивэн', S: 'S — спорткар',
 };
 for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
   db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)').run(k, v);
@@ -176,8 +204,16 @@ function getSettings() {
     capacity: +s.capacity, booking_days: +s.booking_days,
     days_off: s.days_off ? s.days_off.split(',').map(Number) : [],
     address: s.address, phone: s.phone,
+    price_body: JSON.parse(s.price_body || '{}'), price_class: JSON.parse(s.price_class || '{}'),
+    body_types: BODY_TYPES, car_classes: CAR_CLASSES,
   };
 }
+// итоговый множитель цены = кузов × класс (не заданный = 1)
+function priceK(body, cls) {
+  const s = getSettings();
+  return Math.round((s.price_body[body] || 1) * (s.price_class[cls] || 1) * 1000) / 1000;
+}
+const roundPrice = (p) => Math.round(p / 100) * 100;
 
 // ---------- seed ----------
 if (!db.prepare("SELECT 1 FROM users WHERE role='admin'").get()) {
@@ -203,6 +239,12 @@ if (!db.prepare('SELECT 1 FROM services').get()) {
 
 // разовое обновление старого адреса-заглушки
 db.prepare("UPDATE settings SET value=? WHERE key='address' AND value='Уточняйте адрес по телефону'").run(DEFAULT_SETTINGS.address);
+
+// химчистка мебели не зависит от машины — один раз выключаем для неё множитель
+if (!db.prepare("SELECT 1 FROM settings WHERE key='mig_scaled'").get()) {
+  db.prepare("UPDATE services SET scaled=0 WHERE name='Химчистка мебели'").run();
+  db.prepare("INSERT INTO settings(key,value) VALUES('mig_scaled','1')").run();
+}
 
 // ---------- availability ----------
 const todayStr = () => new Date().toLocaleDateString('sv-SE', { timeZone: process.env.TZ || 'Europe/Moscow' });
@@ -335,8 +377,13 @@ app.post('/api/me/password', need(), h((req) => {
 }));
 
 // --- public ---
-app.get('/api/services', h(() => db.prepare('SELECT id,name,description,duration,price FROM services WHERE active=1 ORDER BY sort,id').all()));
+app.get('/api/services', h(() => db.prepare('SELECT id,name,description,duration,price,scaled FROM services WHERE active=1 ORDER BY sort,id').all()));
 app.get('/api/settings', h(() => getSettings()));
+app.get('/api/quote', h((req) => {
+  const make = str(req.query.make, 60), model = str(req.query.model, 60);
+  const cls = lookupClass(make, model) || (CAR_CLASSES[req.query.car_class] ? req.query.car_class : '');
+  return { car_class: cls, k: priceK(BODY_TYPES[req.query.body] ? req.query.body : '', cls) };
+}));
 app.get('/api/slots', h((req) => {
   const services = pickServices(String(req.query.services || '').split(',').filter(Boolean));
   const duration = services.reduce((a, s) => a + s.duration, 0);
@@ -365,7 +412,12 @@ function createOrder(body, { userId, clientName, clientPhone, adminMode }) {
   const date = str(body.date, 10);
   const start = Number(body.start_min);
   const duration = services.reduce((a, s) => a + s.duration, 0);
-  const total = services.reduce((a, s) => a + s.price, 0);
+  const body_ = BODY_TYPES[body.car_body] ? body.car_body : '';
+  // класс берём из справочника (клиент не может «удешевить» авто); админ может указать вручную
+  const cls = (adminMode && CAR_CLASSES[body.car_class] ? body.car_class : lookupClass(make, model)) || (CAR_CLASSES[body.car_class] ? body.car_class : '');
+  const k = priceK(body_, cls);
+  const priced = services.map((s) => ({ ...s, price: s.scaled ? roundPrice(s.price * k) : s.price }));
+  const total = priced.reduce((a, s) => a + s.price, 0);
   return tx(() => {
     // проверка внутри транзакции, чтобы два клиента не заняли одно окно
     if (adminMode) {
@@ -376,10 +428,10 @@ function createOrder(body, { userId, clientName, clientPhone, adminMode }) {
       throw new HttpError(409, 'Это время уже занято — выберите другое');
     }
     const { lastInsertRowid: id } = db.prepare(
-      'INSERT INTO orders(user_id,client_name,client_phone,car,car_make,car_model,plate,date,start_min,end_min,total_price,comment,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)'
-    ).run(userId, clientName, clientPhone, car, make, model, plate, date, start, start + duration, total, str(body.comment, 1000), adminMode ? 'confirmed' : 'new');
+      'INSERT INTO orders(user_id,client_name,client_phone,car,car_make,car_model,plate,car_body,car_class,price_k,date,start_min,end_min,total_price,comment,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(userId, clientName, clientPhone, car, make, model, plate, body_, cls, k, date, start, start + duration, total, str(body.comment, 1000), adminMode ? 'confirmed' : 'new');
     const ins = db.prepare('INSERT INTO order_services(order_id,service_id,name,duration,price) VALUES(?,?,?,?,?)');
-    for (const s of services) ins.run(id, s.id, s.name, s.duration, s.price);
+    for (const s of priced) ins.run(id, s.id, s.name, s.duration, s.price);
     return { id: Number(id) };
   });
 }
@@ -525,8 +577,8 @@ app.get('/api/admin/reports.csv', need('admin'), (req, res, next) => {
     const rows = withServices(db.prepare(`${ORDER_SELECT} WHERE o.date BETWEEN ? AND ? ORDER BY o.date, o.start_min`).all(from, to));
     const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-    const lines = [['№', 'Дата', 'Начало', 'Конец', 'Клиент', 'Телефон', 'Марка', 'Модель', 'Госномер', 'Услуги', 'Сумма', 'Статус', 'Мастер', 'Комментарий'].map(q).join(';')];
-    for (const o of rows) lines.push([o.id, o.date, hhmm(o.start_min), hhmm(o.end_min), o.client_name, o.client_phone, o.car_make || o.car, o.car_model, o.plate,
+    const lines = [['№', 'Дата', 'Начало', 'Конец', 'Клиент', 'Телефон', 'Марка', 'Модель', 'Госномер', 'Кузов', 'Класс', 'Множитель', 'Услуги', 'Сумма', 'Статус', 'Мастер', 'Комментарий'].map(q).join(';')];
+    for (const o of rows) lines.push([o.id, o.date, hhmm(o.start_min), hhmm(o.end_min), o.client_name, o.client_phone, o.car_make || o.car, o.car_model, o.plate, BODY_TYPES[o.car_body] || '', o.car_class, o.price_k,
       o.services.map((x) => x.name).join(', '), o.total_price, STATUS_RU[o.status], o.worker_name, o.comment].map(q).join(';'));
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="dna-orders-${from}_${to}.csv"`);
@@ -546,14 +598,14 @@ function serviceFields(b) {
   if (!name) throw new HttpError(400, 'Укажите название');
   if (!(duration >= 5 && duration <= 1440)) throw new HttpError(400, 'Длительность — от 5 до 1440 минут');
   if (price < 0) throw new HttpError(400, 'Некорректная цена');
-  return [name, str(b.description, 300), duration, price, b.active === false || b.active === 0 ? 0 : 1, Math.round(Number(b.sort) || 0)];
+  return [name, str(b.description, 300), duration, price, b.active === false || b.active === 0 ? 0 : 1, Math.round(Number(b.sort) || 0), b.scaled === false || b.scaled === 0 ? 0 : 1];
 }
 app.post('/api/admin/services', need('admin'), h((req) => {
-  const r = db.prepare('INSERT INTO services(name,description,duration,price,active,sort) VALUES(?,?,?,?,?,?)').run(...serviceFields(req.body));
+  const r = db.prepare('INSERT INTO services(name,description,duration,price,active,sort,scaled) VALUES(?,?,?,?,?,?,?)').run(...serviceFields(req.body));
   return { id: Number(r.lastInsertRowid) };
 }));
 app.put('/api/admin/services/:id', need('admin'), h((req) => {
-  db.prepare('UPDATE services SET name=?,description=?,duration=?,price=?,active=?,sort=? WHERE id=?').run(...serviceFields(req.body), req.params.id);
+  db.prepare('UPDATE services SET name=?,description=?,duration=?,price=?,active=?,sort=?,scaled=? WHERE id=?').run(...serviceFields(req.body), req.params.id);
 }));
 app.delete('/api/admin/services/:id', need('admin'), h((req) => { db.prepare('DELETE FROM services WHERE id=?').run(req.params.id); }));
 
@@ -567,6 +619,15 @@ app.patch('/api/admin/users/:id', need('admin'), h((req) => {
   db.prepare('UPDATE users SET role=? WHERE id=?').run(req.body.role, req.params.id);
 }));
 
+function multipliers(obj, allowed) {
+  const out = {};
+  for (const k of Object.keys(allowed)) {
+    const v = Number(obj?.[k] ?? 1);
+    if (!(v >= 0.1 && v <= 10)) throw new HttpError(400, `Множитель «${allowed[k]}» — от 0.1 до 10`);
+    if (v !== 1) out[k] = Math.round(v * 100) / 100;
+  }
+  return out;
+}
 app.put('/api/admin/settings', need('admin'), h((req) => {
   const b = req.body;
   const num = (v, lo, hi) => { const n = Math.round(Number(v)); if (!(n >= lo && n <= hi)) throw new HttpError(400, 'Некорректное значение настроек'); return String(n); };
@@ -575,6 +636,8 @@ app.put('/api/admin/settings', need('admin'), h((req) => {
     capacity: num(b.capacity, 1, 50), booking_days: num(b.booking_days, 1, 365),
     days_off: (Array.isArray(b.days_off) ? b.days_off : []).map(Number).filter((d) => d >= 0 && d <= 6).join(','),
     address: str(b.address, 200), phone: str(b.phone, 40),
+    price_body: JSON.stringify(multipliers(b.price_body, BODY_TYPES)),
+    price_class: JSON.stringify(multipliers(b.price_class, CAR_CLASSES)),
   };
   if (+vals.open_min >= +vals.close_min) throw new HttpError(400, 'Время открытия должно быть раньше закрытия');
   const up = db.prepare('UPDATE settings SET value=? WHERE key=?');
@@ -751,7 +814,9 @@ function carFields(b) {
   if (!make) throw new HttpError(400, 'Укажите марку');
   const year = b.year ? Math.round(Number(b.year)) : null;
   if (year !== null && !(year >= 1950 && year <= new Date().getFullYear() + 1)) throw new HttpError(400, 'Некорректный год');
-  return [make, str(b.model, 60), year, normPlate(b.plate), str(b.color, 30), str(b.vin, 17).toUpperCase(), str(b.note, 200)];
+  const model = str(b.model, 60);
+  return [make, model, year, normPlate(b.plate), str(b.color, 30), str(b.vin, 17).toUpperCase(), str(b.note, 200),
+    BODY_TYPES[b.body] ? b.body : '', lookupClass(make, model) || (CAR_CLASSES[b.car_class] ? b.car_class : '')];
 }
 function carSaved(userId, plate) {
   if (!plate) return {};
@@ -765,12 +830,12 @@ function carSaved(userId, plate) {
 app.post('/api/me/cars', need(), h((req) => {
   if (db.prepare('SELECT COUNT(*) AS n FROM cars WHERE user_id=?').get(req.user.id).n >= 10) throw new HttpError(400, 'Не больше 10 авто');
   const f = carFields(req.body);
-  db.prepare('INSERT INTO cars(user_id,make,model,year,plate,color,vin,note) VALUES(?,?,?,?,?,?,?,?)').run(req.user.id, ...f);
+  db.prepare('INSERT INTO cars(user_id,make,model,year,plate,color,vin,note,body,car_class) VALUES(?,?,?,?,?,?,?,?,?,?)').run(req.user.id, ...f);
   return carSaved(req.user.id, f[3]);
 }));
 app.put('/api/me/cars/:id', need(), h((req) => {
   const f = carFields(req.body);
-  const r = db.prepare('UPDATE cars SET make=?,model=?,year=?,plate=?,color=?,vin=?,note=? WHERE id=? AND user_id=?').run(...f, req.params.id, req.user.id);
+  const r = db.prepare('UPDATE cars SET make=?,model=?,year=?,plate=?,color=?,vin=?,note=?,body=?,car_class=? WHERE id=? AND user_id=?').run(...f, req.params.id, req.user.id);
   if (!r.changes) throw new HttpError(404, 'Авто не найдено');
   return carSaved(req.user.id, f[3]);
 }));

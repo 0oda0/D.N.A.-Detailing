@@ -4,6 +4,15 @@ let me = null;
 let settings = null;
 let services = [];
 
+// ---------- цена по кузову и классу ----------
+const kFor = (body, cls) => (settings.price_body?.[body] || 1) * (settings.price_class?.[cls] || 1);
+const svcPrice = (s, k) => (s.scaled ? Math.round((s.price * k) / 100) * 100 : s.price);
+const opts = (map, val, empty) => `<option value="">${empty}</option>` + Object.entries(map).map(([k, v]) => `<option value="${k}" ${k === val ? 'selected' : ''}>${esc(v)}</option>`).join('');
+const bodySelect = (attrs, val) => `<select ${attrs}>${opts(settings.body_types, val, '— тип кузова —')}</select>`;
+const classSelect = (attrs, val) => `<select ${attrs}>${opts(settings.car_classes, val, '— класс авто —')}</select>`;
+const findModel = (cars, make, model) => { const m = findMake(cars, make || ''); return m && m[3].find((x) => x[0].toLowerCase() === String(model || '').trim().toLowerCase()); };
+const carMeta = (o) => [settings.body_types[o.car_body || o.body], (o.car_class) && 'класс ' + o.car_class].filter(Boolean).join(', ');
+
 // ---------- utils ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
@@ -112,6 +121,7 @@ pages['/'] = () => {
   </section>
 
   <section class="reveal" id="services"><h2>Услуги и цены</h2>
+    <p class="muted">Цена зависит от типа кузова и класса автомобиля — точную сумму покажет калькулятор ниже</p>
     <div class="grid">${services.map((s) => `
       <div class="card svc">
         <h3>${esc(s.name)}</h3>
@@ -125,9 +135,10 @@ pages['/'] = () => {
 
   <section class="card calc reveal" id="calc">
     <h2>Калькулятор</h2>
-    <p class="muted">Отметьте нужные работы — посчитаем ориентировочную стоимость и время</p>
+    <p class="muted">Укажите машину и отметьте работы — посчитаем ориентировочную стоимость и время</p>
+    <div class="grid" style="margin-bottom:14px"><div>${bodySelect('id="calc-body"', '')}</div><div>${classSelect('id="calc-class"', '')}</div></div>
     <div class="grid" id="calc-list">${services.map((s) => `
-      <label class="check"><input type="checkbox" value="${s.id}"><span><b>${esc(s.name)}</b><br><span class="muted">от ${rub(s.price)} · ${dur(s.duration)}</span></span></label>`).join('')}
+      <label class="check"><input type="checkbox" value="${s.id}"><span><b>${esc(s.name)}</b><br><span class="muted"><span data-cp="${s.id}">от ${rub(s.price)}</span> · ${dur(s.duration)}</span></span></label>`).join('')}
     </div>
     <div class="calc-res"><div>Итого: <b class="price" id="calc-sum">0 ₽</b> · <span id="calc-dur">0 мин</span></div>
       <a class="btn" id="calc-go" href="#/book">Записаться на эти работы</a></div>
@@ -174,12 +185,16 @@ pages['/'] = () => {
   const calc = () => {
     const ids = [...$app.querySelectorAll('#calc-list input:checked')].map((i) => Number(i.value));
     const sel = services.filter((s) => ids.includes(s.id));
+    const body = document.getElementById('calc-body').value, cls = document.getElementById('calc-class').value;
+    const k = kFor(body, cls);
+    services.forEach((s) => { const el = $app.querySelector(`[data-cp="${s.id}"]`); if (el) el.textContent = 'от ' + rub(svcPrice(s, k)); });
     $app.querySelectorAll('#calc-list .check').forEach((l) => l.classList.toggle('on', l.querySelector('input').checked));
-    document.getElementById('calc-sum').textContent = 'от ' + rub(sel.reduce((a, s) => a + s.price, 0));
+    document.getElementById('calc-sum').textContent = 'от ' + rub(sel.reduce((a, s) => a + svcPrice(s, k), 0));
     document.getElementById('calc-dur').textContent = '⏱ ' + dur(sel.reduce((a, s) => a + s.duration, 0));
-    document.getElementById('calc-go').href = ids.length ? `#/book?s=${ids.join(',')}` : '#/book';
+    const qs = [ids.length && 's=' + ids.join(','), body && 'body=' + body, cls && 'cls=' + cls].filter(Boolean).join('&');
+    document.getElementById('calc-go').href = '#/book' + (qs ? '?' + qs : '');
   };
-  $app.querySelectorAll('#calc-list input').forEach((i) => (i.onchange = calc));
+  $app.querySelectorAll('#calc-list input, #calc-body, #calc-class').forEach((i) => (i.onchange = calc));
   document.getElementById('lf').onsubmit = async (e) => {
     e.preventDefault();
     try { await api('/api/leads', formData(e.target)); e.target.reset(); toast('Спасибо! Скоро перезвоним.'); }
@@ -191,7 +206,7 @@ pages['/'] = () => {
 };
 
 // Компонент записи: услуги → авто → дата → свободное время. Используется клиентом и админом.
-const draft = { services: [], car_make: '', car_model: '', plate: '', date: '', start: null, comment: '' };
+const draft = { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', date: '', start: null, comment: '' };
 function bookingForm(container, { admin, onDone }) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   if (params.get('s')) draft.services = params.get('s').split(',').map(Number).filter((id) => services.some((x) => x.id === id));
@@ -214,7 +229,9 @@ function bookingForm(container, { admin, onDone }) {
         <label>Модель</label>
         <input id="b-model" list="b-models" maxlength="60" autocomplete="off" placeholder="Выберите или впишите" value="${esc(draft.car_model)}"><datalist id="b-models"></datalist>
         <label>Госномер (необязательно)</label>
-        <input id="b-plate" data-plate maxlength="12" autocomplete="off" placeholder="А 123 ВС 777" value="${esc(plateView(draft.plate))}" style="text-transform:uppercase;letter-spacing:1px"></div>
+        <input id="b-plate" data-plate maxlength="12" autocomplete="off" placeholder="А 123 ВС 777" value="${esc(plateView(draft.plate))}" style="text-transform:uppercase;letter-spacing:1px">
+        <div class="grid" style="margin-top:4px"><div><label>Тип кузова</label>${bodySelect('id="b-body"', draft.car_body)}</div>
+          <div><label>Класс автомобиля</label>${classSelect('id="b-class"', draft.car_class)}<div class="muted" id="b-class-note"></div></div></div></div>
       <div class="card"><h3>3. Дата и время</h3>
         <label>Дата</label><input id="b-date" type="date" value="${draft.date}" ${admin ? '' : `min="${today()}"`}>
         <label>Свободное время</label><div class="slots" id="b-slots"></div>
@@ -252,9 +269,10 @@ function bookingForm(container, { admin, onDone }) {
   function summary() {
     const sel = services.filter((s) => draft.services.includes(s.id));
     const total = sel.reduce((a, s) => a + s.duration, 0);
+    const k = kFor(draft.car_body, draft.car_class);
     q('b-sum').innerHTML = sel.length ? `
-      ${sel.map((s) => `<div>${esc(s.name)}</div>`).join('')}
-      <p class="muted">Длительность: <b>${dur(total)}</b><br>Стоимость: <b class="price">от ${rub(sel.reduce((a, s) => a + s.price, 0))}</b></p>
+      ${sel.map((s) => `<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(s.name)}</span><span class="muted">${rub(svcPrice(s, k))}</span></div>`).join('')}
+      <p class="muted">Длительность: <b>${dur(total)}</b><br>Стоимость: <b class="price">от ${rub(sel.reduce((a, s) => a + svcPrice(s, k), 0))}</b>${k !== 1 ? `<br>Множитель за кузов и класс: ×${+k.toFixed(2)}` : ''}</p>
       ${draft.start != null ? `<p>📅 ${fmtDate(draft.date)}<br>🕒 ${hm(draft.start)} – ${hm(draft.start + total)}</p>` : '<p class="muted">Выберите время</p>'}`
       : '<p class="muted">Выберите услуги</p>';
   }
@@ -283,25 +301,42 @@ function bookingForm(container, { admin, onDone }) {
     summary();
   }
 
+  if (params.get('body') && settings.body_types[params.get('body')]) draft.car_body = q('b-body').value = params.get('body');
+  if (params.get('cls') && settings.car_classes[params.get('cls')]) draft.car_class = q('b-class').value = params.get('cls');
+  q('b-body').onchange = (e) => { draft.car_body = e.target.value; summary(); };
+  q('b-class').onchange = (e) => { draft.car_class = e.target.value; summary(); };
+  let carsDb = [];
+  // класс подставляем из справочника; клиент его не меняет, если модель найдена
+  const syncClass = () => {
+    const md = findModel(carsDb, draft.car_make, draft.car_model);
+    if (md && md[2]) { draft.car_class = md[2]; q('b-class').value = md[2]; }
+    q('b-class').disabled = !admin && !!(md && md[2]);
+    q('b-class-note').textContent = md && md[2] ? 'Определён по справочнику' + (md[3] ? `, выпуск ${md[3]}–${md[4] || 'н.в.'}` : '') : '';
+    summary();
+  };
+  q('b-model').addEventListener('change', syncClass);
   loadCars().then((cars) => {
+    carsDb = cars;
     const setModels = () => {
       const m = findMake(cars, draft.car_make);
-      q('b-models').innerHTML = m ? m[3].map((x) => `<option value="${esc(x[0])}">${esc(x[1] || '')}</option>`).join('') : '';
+      q('b-models').innerHTML = m ? m[3].map((x) => `<option value="${esc(x[0])}">${esc([x[1], x[3] && `${x[3]}–${x[4] || 'н.в.'}`].filter(Boolean).join(' · '))}</option>`).join('') : '';
     };
     q('b-makes').innerHTML = cars.map((m) => `<option value="${esc(m[0])}">${esc(m[1])}</option>`).join('');
     setModels();
     q('b-make').onchange = (e) => {
       const m = findMake(cars, e.target.value);
       if (m) e.target.value = m[0]; // кириллицу приводим к официальному названию
-      draft.car_make = e.target.value; draft.car_model = ''; q('b-model').value = ''; setModels();
+      draft.car_make = e.target.value; draft.car_model = ''; q('b-model').value = ''; setModels(); syncClass();
     };
+    syncClass();
   });
   let garage = [];
   if (!admin && me) api('/api/me/profile').then(({ cars }) => {
     garage = cars;
     const pick = (c) => {
-      Object.assign(draft, { car_make: c.make, car_model: c.model, plate: c.plate });
+      Object.assign(draft, { car_make: c.make, car_model: c.model, plate: c.plate, car_body: c.body, car_class: c.car_class });
       q('b-make').value = c.make; q('b-model').value = c.model; q('b-plate').value = plateView(c.plate);
+      q('b-body').value = c.body; q('b-class').value = c.car_class; syncClass();
       q('b-garage').querySelectorAll('.slot').forEach((x) => x.classList.toggle('on', Number(x.dataset.car) === c.id));
     };
     if (cars.length) q('b-garage').innerHTML = '<span class="muted" style="align-self:center">Из гаража:</span>' + cars.map((c) => `<button type="button" class="slot" data-car="${c.id}">🚗 ${esc(carTitle(c))}${c.plate ? ' · ' + esc(plateView(c.plate)) : ''}</button>`).join('');
@@ -327,7 +362,7 @@ function bookingForm(container, { admin, onDone }) {
     if (!plateOk(draft.plate)) return (err.textContent = 'Госномер в формате А 123 ВС 777');
     if (draft.start == null) return (err.textContent = 'Выберите время');
     if (!admin && !me) { toast('Войдите или зарегистрируйтесь — заказ сохранится'); location.hash = '#/login?next=book'; return; }
-    const body = { services: draft.services, car_make: draft.car_make, car_model: draft.car_model, plate: draft.plate, date: draft.date, start_min: draft.start, comment: draft.comment };
+    const body = { services: draft.services, car_make: draft.car_make, car_model: draft.car_model, plate: draft.plate, car_body: draft.car_body, car_class: draft.car_class, date: draft.date, start_min: draft.start, comment: draft.comment };
     if (admin) {
       const typed = q('b-user').value.trim();
       const u = typed && users.find((x) => `${x.name} ${x.phone}` === typed);
@@ -340,8 +375,8 @@ function bookingForm(container, { admin, onDone }) {
       await api(admin ? '/api/admin/orders' : '/api/orders', body);
       // новое авто клиента сохраняем в гараж, чтобы в следующий раз выбрать в один клик
       if (!admin && !garage.some((c) => (body.plate && c.plate === body.plate) || (c.make === body.car_make && c.model === body.car_model)))
-        api('/api/me/cars', { make: body.car_make, model: body.car_model, plate: body.plate }).catch(() => {});
-      Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', start: null, comment: '' });
+        api('/api/me/cars', { make: body.car_make, model: body.car_model, plate: body.plate, body: body.car_body, car_class: body.car_class }).catch(() => {});
+      Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', start: null, comment: '' });
       onDone();
     } catch (e) { err.textContent = e.message; loadSlots(); }
     finally { q('b-submit').disabled = false; }
@@ -382,7 +417,7 @@ function authPage(isReg) {
 pages['/login'] = () => authPage(false);
 pages['/register'] = () => authPage(true);
 
-const carLabel = (o) => esc(o.car) + (o.plate ? ` · <span class="plate">${esc(plateView(o.plate))}</span>` : '');
+const carLabel = (o) => esc(o.car) + (carMeta(o) ? ` <span class="muted">(${esc(carMeta(o))})</span>` : '') + (o.plate ? ` · <span class="plate">${esc(plateView(o.plate))}</span>` : '');
 function orderLine(o) {
   return `<div class="order">
     <div><b>${fmtDate(o.date)}, ${hm(o.start_min)}–${hm(o.end_min)}</b> ${badge(o.status)}</div>
@@ -480,6 +515,7 @@ const adminTabs = {
   reviews: ['⭐ Отзывы', adminReviews],
   works: ['🖼 Наши работы', adminWorks],
   services: ['🧽 Услуги', adminServices],
+  pricing: ['💰 Цены по авто', adminPricing],
   users: ['👥 Пользователи', adminUsers],
   settings: ['⚙️ Настройки', adminSettings],
 };
@@ -499,16 +535,17 @@ async function adminServices(c) {
     <td><input name="duration" type="number" min="5" step="5" value="${s.duration ?? 60}" style="min-width:80px"></td>
     <td><input name="price" type="number" min="0" step="100" value="${s.price ?? 0}" style="min-width:90px"></td>
     <td><input name="sort" type="number" value="${s.sort ?? 0}" style="min-width:60px"></td>
+    <td><select name="scaled" title="Применять множитель кузова и класса"><option value="1" ${s.scaled !== 0 ? 'selected' : ''}>Да</option><option value="0" ${s.scaled === 0 ? 'selected' : ''}>Нет</option></select></td>
     <td><select name="active"><option value="1" ${s.active !== 0 ? 'selected' : ''}>Да</option><option value="0" ${s.active === 0 ? 'selected' : ''}>Скрыта</option></select></td>
     <td><button class="btn small" data-save>${s.id ? 'Сохранить' : 'Добавить'}</button> ${s.id ? '<button class="btn small danger" data-del>×</button>' : ''}</td></tr>`;
   c.innerHTML = `<p class="muted">Длительность в минутах — по ней считается свободное время. Скрытые услуги не видны клиентам.</p>
-    <div class="table"><table><thead><tr><th>Услуга</th><th>Мин</th><th>Цена от, ₽</th><th>Порядок</th><th>Видна</th><th></th></tr></thead>
+    <div class="table"><table><thead><tr><th>Услуга</th><th>Мин</th><th>Цена от, ₽</th><th>Порядок</th><th>Множитель авто</th><th>Видна</th><th></th></tr></thead>
     <tbody>${list.map(row).join('')}${row()}</tbody></table></div>`;
   c.querySelectorAll('tr[data-id]').forEach((tr) => {
     const id = tr.dataset.id;
     tr.querySelector('[data-save]').onclick = async () => {
       const b = {}; tr.querySelectorAll('[name]').forEach((i) => (b[i.name] = i.value));
-      b.active = b.active === '1';
+      b.active = b.active === '1'; b.scaled = b.scaled === '1';
       try {
         await api(id ? `/api/admin/services/${id}` : '/api/admin/services', b, id ? 'PUT' : 'POST');
         toast('Сохранено'); await refreshServices(); adminServices(c);
@@ -579,10 +616,50 @@ async function adminSettingsForm(c) {
     const f = e.target, d = formData(f);
     try {
       await api('/api/admin/settings', {
+        price_body: s.price_body, price_class: s.price_class,
         open_min: toMin(d.open), close_min: d.close === '00:00' ? 1440 : toMin(d.close), step_min: d.step_min, capacity: d.capacity,
         booking_days: d.booking_days, days_off: [...f.querySelectorAll('[name=off]:checked')].map((i) => i.value), phone: d.phone, address: d.address,
       }, 'PUT');
       settings = await api('/api/settings'); renderNav(); toast('Настройки сохранены');
+    } catch (er) { toast(er.message, 1); }
+  };
+}
+
+const settingsBody = (s) => ({
+  open_min: s.open_min, close_min: s.close_min, step_min: s.step_min, capacity: s.capacity, booking_days: s.booking_days,
+  days_off: s.days_off, phone: s.phone, address: s.address, price_body: s.price_body, price_class: s.price_class,
+});
+async function adminPricing(c) {
+  const s = await api('/api/settings');
+  const row = (group, k, label) => `<tr><td>${esc(label)}</td><td><input type="number" step="0.05" min="0.1" max="10" data-g="${group}" data-k="${k}" value="${(s[group][k] || 1)}" style="max-width:110px"></td></tr>`;
+  const sample = services.find((x) => x.scaled) || services[0];
+  c.innerHTML = `<p class="muted">Цена услуги = базовая цена × множитель кузова × множитель класса (округляется до 100 ₽).
+      Класс определяется автоматически по справочнику моделей, тип кузова выбирает клиент. 1 — без изменений, 1.2 — дороже на 20%.
+      У услуг, не зависящих от машины (например, химчистка мебели), множитель отключается во вкладке «Услуги».</p>
+    <div class="charts">
+      <div class="card"><h3>Тип кузова</h3><div class="table"><table><tbody>${Object.entries(s.body_types).map(([k, v]) => row('price_body', k, v)).join('')}</tbody></table></div></div>
+      <div class="card"><h3>Класс автомобиля</h3><div class="table"><table><tbody>${Object.entries(s.car_classes).map(([k, v]) => row('price_class', k, v)).join('')}</tbody></table></div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h3>Проверка</h3>
+      <div class="grid"><div>${bodySelect('id="pp-body"', 'suv')}</div><div>${classSelect('id="pp-class"', 'J')}</div></div>
+      <p id="pp-res"></p>
+      <button class="btn" id="pp-save">Сохранить множители</button></div>`;
+  const read = () => {
+    const out = { price_body: {}, price_class: {} };
+    c.querySelectorAll('[data-g]').forEach((i) => (out[i.dataset.g][i.dataset.k] = Number(i.value) || 1));
+    return out;
+  };
+  const preview = () => {
+    const m = read(), b = c.querySelector('#pp-body').value, cl = c.querySelector('#pp-class').value;
+    const k = (m.price_body[b] || 1) * (m.price_class[cl] || 1);
+    c.querySelector('#pp-res').innerHTML = sample ? `${esc(sample.name)}: базовая ${rub(sample.price)} → <b class="price">${rub(svcPrice(sample, k))}</b> (×${+k.toFixed(3)})` : '';
+  };
+  c.querySelectorAll('input, select').forEach((i) => (i.oninput = i.onchange = preview));
+  preview();
+  c.querySelector('#pp-save').onclick = async () => {
+    try {
+      await api('/api/admin/settings', { ...settingsBody(s), ...read() }, 'PUT');
+      settings = await api('/api/settings'); toast('Множители сохранены');
     } catch (er) { toast(er.message, 1); }
   };
 }
@@ -898,6 +975,8 @@ function carForm(box, car, onSaved) {
       <div><label>Модель</label><input name="model" list="cf-models" maxlength="60" autocomplete="off" value="${esc(car.model || '')}"><datalist id="cf-models"></datalist></div>
       <div><label>Год выпуска</label><input name="year" type="number" min="1950" max="${new Date().getFullYear() + 1}" value="${car.year || ''}"></div>
       <div><label>Госномер</label><input name="plate" data-plate maxlength="12" autocomplete="off" placeholder="А 123 ВС 777" value="${esc(plateView(car.plate || ''))}" style="text-transform:uppercase"></div>
+      <div><label>Тип кузова</label>${bodySelect('name="body"', car.body || '')}</div>
+      <div><label>Класс</label>${classSelect('name="car_class"', car.car_class || '')}<div class="muted" id="cf-cls-note"></div></div>
       <div><label>Цвет</label><input name="color" maxlength="30" value="${esc(car.color || '')}"></div>
       <div><label>VIN</label><input name="vin" maxlength="17" value="${esc(car.vin || '')}" style="text-transform:uppercase"></div>
     </div>
@@ -906,15 +985,24 @@ function carForm(box, car, onSaved) {
   </form>`;
   const f = box.querySelector('form');
   loadCars().then((cars) => {
-    const setModels = () => { const m = findMake(cars, f.make.value); f.querySelector('#cf-models').innerHTML = m ? m[3].map((x) => `<option value="${esc(x[0])}">${esc(x[1] || '')}</option>`).join('') : ''; };
+    const setModels = () => { const m = findMake(cars, f.make.value); f.querySelector('#cf-models').innerHTML = m ? m[3].map((x) => `<option value="${esc(x[0])}">${esc([x[1], x[3] && `${x[3]}–${x[4] || 'н.в.'}`].filter(Boolean).join(' · '))}</option>`).join('') : ''; };
+    // класс и годы выпуска — из справочника
+    const syncModel = () => {
+      const md = findModel(cars, f.make.value, f.model.value);
+      f.car_class.disabled = !!(md && md[2]);
+      if (md && md[2]) f.car_class.value = md[2];
+      if (md && md[3]) { f.year.min = md[3]; f.year.max = md[4] || new Date().getFullYear() + 1; f.year.placeholder = `${md[3]}–${md[4] || 'н.в.'}`; }
+      f.querySelector('#cf-cls-note').textContent = md && md[2] ? 'по справочнику' : '';
+    };
     f.querySelector('#cf-makes').innerHTML = cars.map((m) => `<option value="${esc(m[0])}">${esc(m[1])}</option>`).join('');
-    setModels();
-    f.make.onchange = () => { const m = findMake(cars, f.make.value); if (m) f.make.value = m[0]; setModels(); };
+    setModels(); syncModel();
+    f.make.onchange = () => { const m = findMake(cars, f.make.value); if (m) f.make.value = m[0]; setModels(); syncModel(); };
+    f.model.onchange = syncModel;
   });
   f.querySelector('[data-cancel]').onclick = () => (box.innerHTML = '');
   f.onsubmit = async (e) => {
     e.preventDefault();
-    const d = formData(f); d.plate = plateRaw(d.plate);
+    const d = formData(f); d.plate = plateRaw(d.plate); d.car_class = f.car_class.value;
     if (!plateOk(d.plate)) return toast('Госномер в формате А 123 ВС 777', 1);
     try {
       const r = await api(car.id ? `/api/me/cars/${car.id}` : '/api/me/cars', d, car.id ? 'PUT' : 'POST');
@@ -940,6 +1028,7 @@ pages['/profile'] = async () => {
       <div class="grid garage" style="margin-top:12px">${cars.length ? cars.map((c) => `<div class="card">
         <h3>${esc(carTitle(c))}</h3>
         ${c.plate ? `<span class="plate">${esc(plateView(c.plate))}</span>` : ''}
+        ${carMeta(c) ? `<div class="muted" style="margin-top:6px">${esc(carMeta(c))}</div>` : ''}
         <div class="muted" style="margin-top:6px">${[c.color, c.vin && 'VIN ' + c.vin].filter(Boolean).map(esc).join(' · ')}</div>
         ${c.note ? `<div class="muted">📝 ${esc(c.note)}</div>` : ''}
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"><a class="btn small" href="#/book?car=${c.id}">Записать</a>
