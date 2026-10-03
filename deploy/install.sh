@@ -54,6 +54,18 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 UNIT
+# ежедневный бэкап: консистентная копия базы (VACUUM INTO) + фото, храним 14 дней
+cat > /etc/cron.daily/dna-backup <<'CRON'
+#!/bin/sh
+set -e
+D=/var/backups/dna; mkdir -p "$D"; T=$(date +%F)
+rm -f "$D/dna-$T.sqlite"
+node -e "new (require('node:sqlite').DatabaseSync)('/opt/dna-detailing/data/dna.sqlite').exec(\"VACUUM INTO '$D/dna-$T.sqlite'\")" 2>/dev/null
+tar -czf "$D/uploads-$T.tar.gz" -C /opt/dna-detailing/data uploads
+find "$D" -type f -mtime +14 -delete
+CRON
+chmod +x /etc/cron.daily/dna-backup
+
 systemctl daemon-reload
 systemctl enable dna-detailing >/dev/null
 systemctl restart dna-detailing

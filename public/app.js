@@ -573,23 +573,35 @@ async function adminLeads(c) {
 
 async function adminUsers(c) {
   const [users, matches] = await Promise.all([api('/api/admin/users'), api('/api/admin/matches')]);
-  c.innerHTML = `${matches.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px"><h3>🔗 Совпадения по госномерам</h3>
-      <p class="muted">Клиент добавил в гараж авто, на номер которого уже есть заказы без привязки к аккаунту (например, созданные вручную по звонку). Проверьте и привяжите — история и отчёты по клиенту станут полными.</p>
-      <div class="table"><table><thead><tr><th>Клиент</th><th>Авто</th><th>Заказов</th><th>Прошлые заказы</th><th></th></tr></thead><tbody>
-      ${matches.map((m) => `<tr><td>${esc(m.name)}<br><span class="muted">${esc(phoneView(m.phone))}</span></td><td>${esc(m.make)} ${esc(m.model)}<br><span class="plate">${esc(plateView(m.plate))}</span></td>
+  c.innerHTML = `${matches.length ? `<div class="card" style="border-color:var(--warn);margin-bottom:16px"><h3>🔗 Совпадения: старые заказы без аккаунта</h3>
+      <p class="muted">Заказы, созданные вручную (по звонку), совпадают с зарегистрированным клиентом по госномеру из гаража или по телефону. Телефон при регистрации не подтверждается по SMS — сверьте имя и авто, прежде чем привязать.</p>
+      <div class="table"><table><thead><tr><th>Клиент</th><th>Совпадение</th><th>Заказов</th><th>Прошлые заказы</th><th></th></tr></thead><tbody>
+      ${matches.map((m) => `<tr><td>${esc(m.name)}<br><span class="muted">${esc(phoneView(m.phone))}</span></td>
+        <td>${m.kind === 'plate' ? `${esc(m.make)} ${esc(m.model)}<br><span class="plate">${esc(plateView(m.plate))}</span>` : '📞 по телефону'}</td>
         <td>${m.n}</td><td class="muted" style="max-width:320px">${esc(m.samples)}</td>
-        <td><button class="btn small" data-link="${m.user_id}" data-plate="${esc(m.plate)}">Привязать</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+        <td><button class="btn small" data-link="${m.user_id}" data-kind="${m.kind}" data-plate="${esc(m.plate)}">Привязать</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
     <p class="muted">Мастер может зарегистрироваться сам с кодом сотрудника или вы можете повысить клиента здесь.</p>
-    <div class="table"><table><thead><tr><th></th><th>Имя</th><th>Телефон</th><th>Гараж</th><th>Заказов</th><th>Роль</th><th>Создан</th></tr></thead><tbody>
+    <div class="table"><table><thead><tr><th></th><th>Имя</th><th>Телефон</th><th>Гараж</th><th>Заказов</th><th>Роль</th><th>Создан</th><th></th></tr></thead><tbody>
     ${users.map((u) => `<tr><td>${avatarHtml(u, 36)}</td><td>${esc(u.name)}</td><td><a href="tel:${esc(u.phone)}">${esc(phoneView(u.phone))}</a></td>
       <td class="muted" style="white-space:pre-line">${esc(u.cars || '—')}</td><td>${u.orders}</td>
       <td>${u.id === me.id ? ROLE[u.role] : `<select data-u="${u.id}">${Object.entries(ROLE).map(([k, v]) => `<option value="${k}" ${k === u.role ? 'selected' : ''}>${v}</option>`).join('')}</select>`}</td>
-      <td class="muted">${esc(u.created_at.slice(0, 10))}</td></tr>`).join('')}</tbody></table></div>`;
+      <td class="muted">${esc(u.created_at.slice(0, 10))}</td>
+      <td style="white-space:nowrap">${u.id === me.id ? '' : `<button class="btn small ghost" data-edit="${u.id}" title="Исправить имя или телефон">✎</button> <button class="btn small danger" data-deluser="${u.id}" title="Удалить аккаунт">×</button>`}</td></tr>`).join('')}</tbody></table></div>`;
+  c.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = async () => {
+    const u = users.find((x) => x.id === Number(b.dataset.edit));
+    const name = prompt('Имя', u.name); if (name === null) return;
+    const phone = prompt('Телефон', phoneView(u.phone)); if (phone === null) return;
+    try { await api(`/api/admin/users/${u.id}/contact`, { name, phone }, 'PUT'); toast('Сохранено'); adminUsers(c); } catch (e) { toast(e.message, 1); }
+  }));
+  c.querySelectorAll('[data-deluser]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Удалить аккаунт? Его заказы останутся в базе, но отвяжутся от аккаунта.')) return;
+    try { await api(`/api/admin/users/${b.dataset.deluser}`, undefined, 'DELETE'); toast('Удалено'); adminUsers(c); } catch (e) { toast(e.message, 1); }
+  }));
   c.querySelectorAll('[data-u]').forEach((s) => (s.onchange = async () => {
     try { await api(`/api/admin/users/${s.dataset.u}`, { role: s.value }, 'PATCH'); toast('Роль изменена'); } catch (e) { toast(e.message, 1); adminUsers(c); }
   }));
   c.querySelectorAll('[data-link]').forEach((b) => (b.onclick = async () => {
-    try { const r = await api('/api/admin/matches', { user_id: b.dataset.link, plate: b.dataset.plate }); toast(`Привязано заказов: ${r.linked}`); adminUsers(c); } catch (e) { toast(e.message, 1); }
+    try { const r = await api('/api/admin/matches', { user_id: b.dataset.link, plate: b.dataset.plate, kind: b.dataset.kind }); toast(`Привязано заказов: ${r.linked}`); adminUsers(c); } catch (e) { toast(e.message, 1); }
   }));
 }
 
@@ -1038,7 +1050,8 @@ pages['/profile'] = async () => {
     <div>
       <form class="card" id="pf"><h3>Личные данные</h3>
         <label>Имя</label><input name="name" value="${esc(user.name)}" required maxlength="80">
-        <label>Телефон</label><input name="phone" type="tel" value="${esc(phoneView(user.phone))}" required>
+        <label>Телефон</label><input value="${esc(phoneView(user.phone))}" disabled>
+        <div class="muted" style="margin-top:4px">Телефон — ваш логин и ключ к истории заказов. Чтобы сменить, напишите нам.</div>
         <button class="btn small" style="margin-top:12px">Сохранить</button></form>
       <div id="tg-box"></div>
       <details class="card"><summary>Сменить пароль</summary>

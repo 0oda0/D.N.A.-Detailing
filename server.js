@@ -294,6 +294,13 @@ function pickServices(ids) {
 // ---------- app ----------
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 'loopback'); // корректный IP клиента, если позже поставить nginx
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  next();
+});
 app.use(express.json({ limit: '50kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(DATA_DIR, 'uploads'), { maxAge: '30d' }));
@@ -325,6 +332,7 @@ const h = (fn) => (req, res, next) => { try { const r = fn(req, res); res.json(r
 
 // простая защита от перебора паролей
 const attempts = new Map();
+setInterval(() => { const now = Date.now(); for (const [k, a] of attempts) if (a.every((t) => now - t > 15 * 60e3)) attempts.delete(k); }, 10 * 60e3).unref();
 function throttle(req) {
   const key = req.ip;
   const now = Date.now();
@@ -350,8 +358,11 @@ app.post('/api/register', h((req, res) => {
   }
   if (db.prepare('SELECT 1 FROM users WHERE phone=?').get(phone)) throw new HttpError(400, 'Этот телефон уже зарегистрирован');
   const { lastInsertRowid } = db.prepare('INSERT INTO users(name,phone,pass,role) VALUES(?,?,?,?)').run(name, phone, hashPassword(password), role);
-  // привязываем заказы, созданные админом на этот телефон до регистрации
-  db.prepare('UPDATE orders SET user_id=? WHERE user_id IS NULL AND client_phone=?').run(lastInsertRowid, phone);
+  // телефон не подтверждён (нет SMS), поэтому старые заказы на этот номер не привязываем сами —
+  // они появятся у админа в «Совпадениях» для ручной проверки
+  if (db.prepare('SELECT 1 FROM orders WHERE user_id IS NULL AND client_phone=?').get(phone)) {
+    notifyAdmins(`🔗 <b>Совпадение по телефону</b>\n${tgEsc(name)} ${phone} зарегистрировался(ась); есть старые заказы на этот номер. Проверьте: Админка → Пользователи.`);
+  }
   startSession(res, lastInsertRowid);
   return { id: Number(lastInsertRowid), name, phone, role };
 }));
@@ -374,6 +385,8 @@ app.post('/api/me/password', need(), h((req) => {
   if (!checkPassword(String(req.body.old || ''), u.pass)) throw new HttpError(400, 'Старый пароль неверен');
   if (String(req.body.password || '').length < 6) throw new HttpError(400, 'Пароль — минимум 6 символов');
   db.prepare('UPDATE users SET pass=? WHERE id=?').run(hashPassword(String(req.body.password)), req.user.id);
+  // выходим на всех остальных устройствах
+  db.prepare('DELETE FROM sessions WHERE user_id=? AND token!=?').run(req.user.id, parseCookies(req.headers.cookie).sid || '');
 }));
 
 // --- public ---
@@ -441,7 +454,11 @@ function withServices(rows) {
 }
 const ORDER_SELECT = 'SELECT o.*, w.name AS worker_name FROM orders o LEFT JOIN users w ON w.id=o.worker_id';
 
+const MAX_ACTIVE_ORDERS = 3;
 app.post('/api/orders', need(), h((req) => {
+  if (req.user.role === 'client' && db.prepare("SELECT COUNT(*) AS n FROM orders WHERE user_id=? AND status IN ('new','confirmed') AND date>=?").get(req.user.id, todayStr()).n >= MAX_ACTIVE_ORDERS) {
+    throw new HttpError(400, `У вас уже ${MAX_ACTIVE_ORDERS} активные записи. Чтобы записаться ещё, позвоните или напишите нам.`);
+  }
   const r = createOrder(req.body, { userId: req.user.id, clientName: req.user.name, clientPhone: req.user.phone, adminMode: false });
   const o = db.prepare('SELECT * FROM orders WHERE id=?').get(r.id);
   notifyAdmins(`🆕 <b>Новая онлайн-запись</b>\n👤 ${tgEsc(o.client_name)} ${o.client_phone}\n${orderText(o)}${o.comment ? '\n💬 ' + tgEsc(o.comment) : ''}`);
@@ -474,11 +491,19 @@ app.patch('/api/staff/orders/:id', need('worker', 'admin'), h((req) => {
   if (b.status !== undefined) {
     const allowed = req.user.role === 'admin' ? ['new', 'confirmed', 'in_progress', 'done', 'cancelled'] : ['in_progress', 'done'];
     if (!allowed.includes(b.status)) throw new HttpError(400, 'Недопустимый статус');
+    if (req.user.role === 'worker') {
+      // мастер: «Начать» только у новой/подтверждённой, «Готово» только у начатой, и только свой или свободный заказ
+      const from = { in_progress: ['new', 'confirmed'], done: ['in_progress'] }[b.status];
+      if (!from.includes(o.status)) throw new HttpError(400, 'Сейчас этот статус поставить нельзя');
+      if (o.worker_id && o.worker_id !== req.user.id) throw new HttpError(403, 'Это заказ другого мастера');
+      if (!o.worker_id) db.prepare('UPDATE orders SET worker_id=? WHERE id=?').run(req.user.id, o.id);
+    }
     db.prepare('UPDATE orders SET status=? WHERE id=?').run(b.status, o.id);
     if (b.status !== o.status) notifyClient(o.id, b.status);
   }
   if (b.take && req.user.role === 'worker') {
     if (o.worker_id && o.worker_id !== req.user.id) throw new HttpError(400, 'Заказ уже взят другим мастером');
+    if (['done', 'cancelled'].includes(o.status)) throw new HttpError(400, 'Заказ уже закрыт');
     db.prepare('UPDATE orders SET worker_id=? WHERE id=?').run(req.user.id, o.id);
   }
   if (req.user.role === 'admin') {
@@ -495,8 +520,9 @@ app.patch('/api/staff/orders/:id', need('worker', 'admin'), h((req) => {
       if (!validDate(date) || !Number.isInteger(start)) throw new HttpError(400, 'Некорректное время');
       tx(() => {
         if (!b.force && !isFree(date, start, start + dur, getSettings().capacity, o.id)) throw new HttpError(409, 'Это время уже занято');
-        db.prepare('UPDATE orders SET date=?, start_min=?, end_min=? WHERE id=?').run(date, start, start + dur, o.id);
+        db.prepare('UPDATE orders SET date=?, start_min=?, end_min=?, reminded=0 WHERE id=?').run(date, start, start + dur, o.id);
       });
+      if (date !== o.date || start !== o.start_min) notifyClient(o.id, 'moved');
     }
   }
 }));
@@ -512,8 +538,8 @@ app.post('/api/admin/orders', need('admin'), h((req) => {
     clientName = str(req.body.client_name, 80);
     clientPhone = normPhone(req.body.client_phone);
     if (!clientName || !clientPhone) throw new HttpError(400, 'Укажите имя и телефон клиента');
-    const u = db.prepare('SELECT id FROM users WHERE phone=?').get(clientPhone);
-    if (u) userId = u.id;
+    // к аккаунту не привязываем автоматически: чтобы привязать, выберите клиента из списка
+    // или подтвердите совпадение в «Пользователях» (телефоны не подтверждены SMS)
   }
   return createOrder(req.body, { userId, clientName, clientPhone, adminMode: true });
 }));
@@ -544,7 +570,7 @@ app.get('/api/admin/reports', need('admin'), h((req) => {
   // повторные клиенты: были заказы до начала периода
   kpi.repeat_clients = db.prepare(`SELECT COUNT(DISTINCT client_phone) AS n FROM orders o WHERE ${R} AND status!='cancelled'
     AND client_phone IN (SELECT client_phone FROM orders WHERE date < ? AND status!='cancelled')`).get(from, to, from).n;
-  kpi.new_users = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='client' AND date(created_at) BETWEEN ? AND ?").get(from, to).n;
+  kpi.new_users = db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='client' AND date(created_at, 'localtime') BETWEEN ? AND ?").get(from, to).n;
   kpi.leads = db.prepare('SELECT COUNT(*) AS n FROM leads WHERE date(created_at) BETWEEN ? AND ?').get(from, to).n;
   // загрузка: занятые минуты / доступные (часы работы × боксы × рабочие дни)
   const s = getSettings();
@@ -575,7 +601,8 @@ app.get('/api/admin/reports.csv', need('admin'), (req, res, next) => {
   try {
     const [from, to] = reportRange(req.query);
     const rows = withServices(db.prepare(`${ORDER_SELECT} WHERE o.date BETWEEN ? AND ? ORDER BY o.date, o.start_min`).all(from, to));
-    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    // защита от формул в Excel: значение, начинающееся с = + - @, экранируем апострофом
+    const q = (v) => { let t = String(v ?? ''); if (/^[=+\-@\t\r]/.test(t) && !/^-?\d/.test(t)) t = "'" + t; return `"${t.replace(/"/g, '""')}"`; };
     const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
     const lines = [['№', 'Дата', 'Начало', 'Конец', 'Клиент', 'Телефон', 'Марка', 'Модель', 'Госномер', 'Кузов', 'Класс', 'Множитель', 'Услуги', 'Сумма', 'Статус', 'Мастер', 'Комментарий'].map(q).join(';')];
     for (const o of rows) lines.push([o.id, o.date, hhmm(o.start_min), hhmm(o.end_min), o.client_name, o.client_phone, o.car_make || o.car, o.car_model, o.plate, BODY_TYPES[o.car_body] || '', o.car_class, o.price_k,
@@ -613,6 +640,16 @@ app.get('/api/admin/users', need('admin'), h(() => db.prepare(`SELECT u.id,u.nam
     (SELECT GROUP_CONCAT(c.make || ' ' || c.model || CASE WHEN c.plate!='' THEN ' · ' || c.plate ELSE '' END, '\n') FROM cars c WHERE c.user_id=u.id) AS cars,
     (SELECT COUNT(*) FROM orders o WHERE o.user_id=u.id AND o.status!='cancelled') AS orders
   FROM users u ORDER BY u.role, u.name`).all()));
+app.put('/api/admin/users/:id/contact', need('admin'), h((req) => {
+  const name = str(req.body.name, 80), phone = normPhone(req.body.phone);
+  if (!name || !phone) throw new HttpError(400, 'Укажите имя и корректный телефон');
+  if (db.prepare('SELECT 1 FROM users WHERE phone=? AND id!=?').get(phone, req.params.id)) throw new HttpError(400, 'Этот телефон уже у другого аккаунта');
+  db.prepare('UPDATE users SET name=?, phone=? WHERE id=?').run(name, phone, req.params.id);
+}));
+app.delete('/api/admin/users/:id', need('admin'), h((req) => {
+  if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'Нельзя удалить себя');
+  db.prepare('DELETE FROM users WHERE id=?').run(req.params.id); // заказы остаются, отвязываются от аккаунта
+}));
 app.patch('/api/admin/users/:id', need('admin'), h((req) => {
   if (!['client', 'worker', 'admin'].includes(req.body.role)) throw new HttpError(400, 'Недопустимая роль');
   if (Number(req.params.id) === req.user.id) throw new HttpError(400, 'Нельзя менять свою роль');
@@ -679,6 +716,7 @@ function notifyClient(orderId, kind) {
     confirmed: `✅ <b>Запись подтверждена</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}`,
     done: `🎉 <b>Ваш автомобиль готов!</b>\n🚗 ${tgEsc(o.car)}\nБудем рады отзыву${SITE_URL ? ` в личном кабинете: ${SITE_URL}/#/my` : ' в личном кабинете на сайте'}`,
     cancelled: `❌ Запись отменена\n${orderText(o)}`,
+    moved: `🔁 <b>Запись перенесена</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}`,
     reminder: `⏰ <b>Напоминаем о записи в D.N.A. Detailing</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}\n\nЕсли планы изменились — отмените запись в личном кабинете или напишите нам.`,
   }[kind];
   if (msg) tgSend(o.tg_chat_id, msg);
@@ -696,7 +734,7 @@ async function tgPoll() {
       const user = token && db.prepare('SELECT * FROM users WHERE tg_token=?').get(token);
       if (user) {
         db.prepare('UPDATE users SET tg_chat_id=NULL WHERE tg_chat_id=?').run(m.chat.id);
-        db.prepare('UPDATE users SET tg_chat_id=? WHERE id=?').run(m.chat.id, user.id);
+        db.prepare('UPDATE users SET tg_chat_id=?, tg_token=NULL WHERE id=?').run(m.chat.id, user.id); // ссылка одноразовая
         tgSend(m.chat.id, user.role === 'admin'
           ? `Готово, ${tgEsc(user.name)}! Сюда будут приходить новые записи, заявки и отзывы.`
           : `Готово, ${tgEsc(user.name)}! Мы пришлём напоминание за день до визита и сообщим, когда авто будет готово.`);
@@ -782,6 +820,11 @@ app.delete('/api/admin/works/:id', need('admin'), h((req) => {
 function saveImage(req) {
   const ext = IMG_TYPES[req.headers['content-type']];
   if (!ext || !Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Нужна картинка JPG, PNG или WebP');
+  // проверяем сигнатуру файла, а не только заявленный тип
+  const b = req.body;
+  const ok = (b[0] === 0xff && b[1] === 0xd8) || b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    || (b.subarray(0, 4).toString() === 'RIFF' && b.subarray(8, 12).toString() === 'WEBP');
+  if (!ok) throw new HttpError(400, 'Файл не похож на картинку');
   const name = crypto.randomBytes(12).toString('hex') + '.' + ext;
   fs.writeFileSync(path.join(UPLOAD_DIR, name), req.body);
   return '/uploads/' + name;
@@ -796,12 +839,10 @@ app.get('/api/me/profile', need(), h((req) => ({
   stats: db.prepare("SELECT COUNT(*) AS orders, COALESCE(SUM(CASE WHEN status='done' THEN total_price END),0) AS spent FROM orders WHERE user_id=? AND status!='cancelled'").get(req.user.id),
 })));
 app.patch('/api/me', need(), h((req) => {
+  // телефон — это логин и ключ к истории заказов; без SMS-подтверждения его меняет только админ
   const name = str(req.body.name, 80);
-  const phone = normPhone(req.body.phone);
   if (!name) throw new HttpError(400, 'Укажите имя');
-  if (!phone) throw new HttpError(400, 'Некорректный телефон');
-  if (db.prepare('SELECT 1 FROM users WHERE phone=? AND id!=?').get(phone, req.user.id)) throw new HttpError(400, 'Этот телефон уже занят другим аккаунтом');
-  db.prepare('UPDATE users SET name=?, phone=? WHERE id=?').run(name, phone, req.user.id);
+  db.prepare('UPDATE users SET name=? WHERE id=?').run(name, req.user.id);
 }));
 app.post('/api/me/avatar', need(), express.raw({ type: Object.keys(IMG_TYPES), limit: '5mb' }), h((req) => {
   const url = saveImage(req);
@@ -843,13 +884,24 @@ app.delete('/api/me/cars/:id', need(), h((req) => { db.prepare('DELETE FROM cars
 
 // админ: совпадения «авто в гараже ↔ старые заказы без привязки» по госномеру
 app.get('/api/admin/matches', need('admin'), h(() => db.prepare(`
-  SELECT c.user_id, u.name, u.phone, c.plate, c.make, c.model, COUNT(o.id) AS n,
+  SELECT 'plate' AS kind, c.user_id, u.name, u.phone, c.plate, c.make, c.model, COUNT(o.id) AS n,
     GROUP_CONCAT(o.date || ' ' || o.client_name || ' ' || o.client_phone, '; ') AS samples
   FROM cars c JOIN users u ON u.id=c.user_id JOIN orders o ON o.plate=c.plate AND o.user_id IS NULL
-  WHERE c.plate!='' GROUP BY c.user_id, c.plate ORDER BY n DESC`).all()));
+  WHERE c.plate!='' GROUP BY c.user_id, c.plate
+  UNION ALL
+  SELECT 'phone', u.id, u.name, u.phone, '', '', '', COUNT(o.id),
+    GROUP_CONCAT(o.date || ' ' || o.client_name || ' ' || o.car, '; ')
+  FROM users u JOIN orders o ON o.client_phone=u.phone AND o.user_id IS NULL
+  GROUP BY u.id
+  ORDER BY 8 DESC`).all()));
 app.post('/api/admin/matches', need('admin'), h((req) => {
-  const plate = normPlate(req.body.plate);
   const uid = Number(req.body.user_id);
+  if (req.body.kind === 'phone') {
+    const u = db.prepare('SELECT phone FROM users WHERE id=?').get(uid);
+    if (!u) throw new HttpError(400, 'Клиент не найден');
+    return { linked: db.prepare('UPDATE orders SET user_id=? WHERE client_phone=? AND user_id IS NULL').run(uid, u.phone).changes };
+  }
+  const plate = normPlate(req.body.plate);
   if (!plate || !db.prepare('SELECT 1 FROM cars WHERE user_id=? AND plate=?').get(uid, plate)) throw new HttpError(400, 'Нет такого авто у клиента');
   return { linked: db.prepare('UPDATE orders SET user_id=? WHERE plate=? AND user_id IS NULL').run(uid, plate).changes };
 }));
