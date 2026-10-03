@@ -206,7 +206,7 @@ pages['/'] = () => {
 };
 
 // Компонент записи: услуги → авто → дата → свободное время. Используется клиентом и админом.
-const draft = { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', date: '', start: null, comment: '' };
+const draft = { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', address: '', promo: null, date: '', start: null, comment: '' };
 function bookingForm(container, { admin, onDone }) {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   if (params.get('s')) draft.services = params.get('s').split(',').map(Number).filter((id) => services.some((x) => x.id === id));
@@ -223,7 +223,10 @@ function bookingForm(container, { admin, onDone }) {
         <label>Имя</label><input id="b-cname">
         <label>Телефон</label><input id="b-cphone" type="tel" placeholder="+7…"></div>` : ''}
       <div class="card"><h3>1. Что сделать</h3><div class="grid" id="b-services"></div></div>
-      <div class="card"><h3>2. Автомобиль</h3><div class="slots" id="b-garage"></div>
+      <div class="card" id="b-addrcard" hidden><h3>🚐 Адрес выезда</h3>
+        <label>Город, улица, дом, квартира / гараж</label><input id="b-address" maxlength="200" value="${esc(draft.address)}" placeholder="Балашиха, ул. …">
+        <div class="muted" style="margin-top:6px">Мастер приедет к вам. Автомобиль для этой услуги указывать не обязательно.</div></div>
+      <div class="card" id="b-carcard"><h3>2. Автомобиль</h3><div class="slots" id="b-garage"></div>
         <label>Марка</label>
         <input id="b-make" list="b-makes" maxlength="60" autocomplete="off" placeholder="Начните вводить: BMW, Лада, Haval…" value="${esc(draft.car_make)}"><datalist id="b-makes"></datalist>
         <label>Модель</label>
@@ -237,9 +240,15 @@ function bookingForm(container, { admin, onDone }) {
         <label>Свободное время</label><div class="slots" id="b-slots"></div>
         ${admin ? `<label>Или любое время вручную (без проверки занятости)</label><input id="b-manual" type="time" step="300">` : ''}
         <label>Комментарий</label><textarea id="b-comment" maxlength="1000">${esc(draft.comment)}</textarea></div>
+      ${!admin && !me ? `<div class="card"><h3>4. Ваши контакты</h3>
+        <p class="muted" style="margin-top:0">Регистрация не нужна. Уже есть аккаунт? <a href="#/login?next=book">Войдите</a></p>
+        <label>Имя</label><input id="b-gname" maxlength="80" autocomplete="name">
+        <label>Телефон</label><input id="b-gphone" type="tel" autocomplete="tel" placeholder="+7 (900) 000-00-00">
+        <label class="check" style="margin-top:12px"><input type="checkbox" id="b-consent"><span>Согласен(на) на обработку персональных данных для записи и связи со мной</span></label></div>` : ''}
     </div>
     <div class="card summary">
       <h3>Ваш заказ</h3><div id="b-sum"></div>
+      ${admin ? '' : `<div style="display:flex;gap:6px;margin-top:10px"><input id="b-promo" placeholder="Промокод" maxlength="30" style="text-transform:uppercase"><button type="button" class="btn small ghost" id="b-promo-btn">ОК</button></div>`}
       <button class="btn" id="b-submit" style="width:100%;margin-top:14px">${admin ? 'Создать заказ' : 'Записаться'}</button>
       <div class="err" id="b-err"></div>
     </div>
@@ -257,23 +266,40 @@ function bookingForm(container, { admin, onDone }) {
     q('b-services').innerHTML = services.map((s) => `
       <label class="check ${draft.services.includes(s.id) ? 'on' : ''}">
         <input type="checkbox" value="${s.id}" ${draft.services.includes(s.id) ? 'checked' : ''}>
-        <span><b>${esc(s.name)}</b><br><span class="muted">${dur(s.duration)} · от ${rub(s.price)}</span></span>
+        <span><b>${esc(s.name)}</b>${s.onsite ? ' <span class="badge">🚐 выезд</span>' : ''}<br><span class="muted">${dur(s.duration)} · от ${rub(s.price)}</span></span>
       </label>`).join('');
     q('b-services').querySelectorAll('input').forEach((i) => (i.onchange = () => {
       const id = Number(i.value);
+      const sv = services.find((x) => x.id === id);
+      // выездные и работы в сервисе — отдельными записями
+      if (i.checked && draft.services.some((x) => !!services.find((y) => y.id === x)?.onsite !== !!sv.onsite)) {
+        draft.services = [];
+        toast(sv.onsite ? 'Выездная услуга оформляется отдельной записью' : 'Работы в сервисе оформляются отдельно от выездных');
+      }
       draft.services = i.checked ? [...draft.services, id] : draft.services.filter((x) => x !== id);
       draft.start = null;
       renderServices(); loadSlots();
     }));
   }
+  const isOnsite = () => services.some((s) => draft.services.includes(s.id) && s.onsite);
+  const promoOff = (sum) => (!draft.promo ? 0 : Math.min(sum, draft.promo.kind === 'pct' ? Math.round((sum * draft.promo.value) / 100 / 100) * 100 : draft.promo.value));
   function summary() {
     const sel = services.filter((s) => draft.services.includes(s.id));
     const total = sel.reduce((a, s) => a + s.duration, 0);
-    const k = kFor(draft.car_body, draft.car_class);
+    const onsite = isOnsite();
+    q('b-addrcard').hidden = !onsite;
+    const k = onsite ? 1 : kFor(draft.car_body, draft.car_class);
+    const sum = sel.reduce((a, s) => a + svcPrice(s, k), 0);
+    const off = promoOff(sum), pay = sum - off;
+    const prepay = !admin && settings.prepay_from > 0 && pay >= settings.prepay_from ? Math.round((pay * settings.prepay_pct) / 100 / 100) * 100 : 0;
     q('b-sum').innerHTML = sel.length ? `
       ${sel.map((s) => `<div style="display:flex;justify-content:space-between;gap:8px"><span>${esc(s.name)}</span><span class="muted">${rub(svcPrice(s, k))}</span></div>`).join('')}
-      <p class="muted">Длительность: <b>${dur(total)}</b><br>Стоимость: <b class="price">от ${rub(sel.reduce((a, s) => a + svcPrice(s, k), 0))}</b>${k !== 1 ? `<br>Множитель за кузов и класс: ×${+k.toFixed(2)}` : ''}</p>
-      ${draft.start != null ? `<p>📅 ${fmtDate(draft.date)}<br>🕒 ${hm(draft.start)} – ${hm(draft.start + total)}</p>` : '<p class="muted">Выберите время</p>'}`
+      <p class="muted">Длительность: <b>${dur(total)}</b>${k !== 1 ? `<br>Множитель за кузов и класс: ×${+k.toFixed(2)}` : ''}
+        ${off ? `<br>Промокод ${esc(draft.promo.code)}: <b>−${rub(off)}</b>` : ''}
+        <br>Итого: <b class="price">от ${rub(pay)}</b>
+        ${prepay ? `<br>⚠️ Предоплата <b>${rub(prepay)}</b> (${settings.prepay_pct}%) — менеджер пришлёт реквизиты` : ''}</p>
+      ${draft.start != null ? `<p>📅 ${fmtDate(draft.date)}<br>🕒 ${hm(draft.start)} – ${hm(draft.start + total)}</p>` : '<p class="muted">Выберите время</p>'}
+      ${!admin && settings.cancel_hours ? `<p class="muted" style="font-size:12px">Онлайн-отмена — не позднее чем за ${settings.cancel_hours} ч до визита</p>` : ''}`
       : '<p class="muted">Выберите услуги</p>';
   }
   let slotReq = 0;
@@ -348,6 +374,16 @@ function bookingForm(container, { admin, onDone }) {
   q('b-model').oninput = (e) => (draft.car_model = e.target.value);
   q('b-plate').oninput = (e) => (draft.plate = plateRaw(e.target.value));
   q('b-comment').oninput = (e) => (draft.comment = e.target.value);
+  q('b-address').oninput = (e) => (draft.address = e.target.value);
+  if (q('b-promo-btn')) q('b-promo-btn').onclick = async () => {
+    const code = q('b-promo').value.trim();
+    if (!code) { draft.promo = null; summary(); return; }
+    const k = isOnsite() ? 1 : kFor(draft.car_body, draft.car_class);
+    const sum = services.filter((s) => draft.services.includes(s.id)).reduce((a, s) => a + svcPrice(s, k), 0);
+    try { draft.promo = await api(`/api/promo?code=${encodeURIComponent(code)}&total=${sum}`); toast('Промокод применён'); }
+    catch (e) { draft.promo = null; toast(e.message, 1); }
+    summary();
+  };
   q('b-date').onchange = (e) => { draft.date = e.target.value; draft.start = null; loadSlots(); };
   if (q('b-manual')) q('b-manual').onchange = (e) => {
     draft.start = e.target.value ? toMin(e.target.value) : null;
@@ -358,11 +394,20 @@ function bookingForm(container, { admin, onDone }) {
   q('b-submit').onclick = async () => {
     const err = q('b-err'); err.textContent = '';
     if (!draft.services.length) return (err.textContent = 'Выберите услуги');
-    if (!draft.car_make.trim()) return (err.textContent = 'Укажите марку автомобиля');
+    const onsite = isOnsite();
+    if (onsite && draft.address.trim().length < 5) return (err.textContent = 'Укажите адрес выезда');
+    if (!onsite && !draft.car_make.trim()) return (err.textContent = 'Укажите марку автомобиля');
     if (!plateOk(draft.plate)) return (err.textContent = 'Госномер в формате А 123 ВС 777');
     if (draft.start == null) return (err.textContent = 'Выберите время');
-    if (!admin && !me) { toast('Войдите или зарегистрируйтесь — заказ сохранится'); location.hash = '#/login?next=book'; return; }
-    const body = { services: draft.services, car_make: draft.car_make, car_model: draft.car_model, plate: draft.plate, car_body: draft.car_body, car_class: draft.car_class, date: draft.date, start_min: draft.start, comment: draft.comment };
+    const body = { services: draft.services, car_make: draft.car_make, car_model: draft.car_model, plate: draft.plate, car_body: draft.car_body, car_class: draft.car_class,
+      date: draft.date, start_min: draft.start, comment: draft.comment, address: onsite ? draft.address : '', promo: draft.promo?.code };
+    const guest = !admin && !me;
+    if (guest) {
+      Object.assign(body, { name: q('b-gname').value, phone: q('b-gphone').value, consent: q('b-consent').checked });
+      if (!body.name.trim()) return (err.textContent = 'Укажите имя');
+      if (body.phone.replace(/\D/g, '').length < 11) return (err.textContent = 'Укажите телефон');
+      if (!body.consent) return (err.textContent = 'Нужно согласие на обработку данных');
+    }
     if (admin) {
       const typed = q('b-user').value.trim();
       const u = typed && users.find((x) => `${x.name} ${x.phone}` === typed);
@@ -372,12 +417,17 @@ function bookingForm(container, { admin, onDone }) {
     }
     q('b-submit').disabled = true;
     try {
-      await api(admin ? '/api/admin/orders' : '/api/orders', body);
+      const r = await api(admin ? '/api/admin/orders' : guest ? '/api/orders/guest' : '/api/orders', body);
+      if (guest) {
+        Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', start: null, comment: '', address: '', promo: null });
+        location.hash = '#/order/' + r.guest_token;
+        return;
+      }
       // новое авто клиента сохраняем в гараж, чтобы в следующий раз выбрать в один клик
-      if (!admin && !garage.some((c) => (body.plate && c.plate === body.plate) || (c.make === body.car_make && c.model === body.car_model)))
+      if (!admin && !onsite && !garage.some((c) => (body.plate && c.plate === body.plate) || (c.make === body.car_make && c.model === body.car_model)))
         api('/api/me/cars', { make: body.car_make, model: body.car_model, plate: body.plate, body: body.car_body, car_class: body.car_class }).catch(() => {});
-      Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', start: null, comment: '' });
-      onDone();
+      Object.assign(draft, { services: [], car_make: '', car_model: '', plate: '', car_body: '', car_class: '', start: null, comment: '', address: '', promo: null });
+      onDone(r);
     } catch (e) { err.textContent = e.message; loadSlots(); }
     finally { q('b-submit').disabled = false; }
   };
@@ -418,14 +468,50 @@ pages['/login'] = () => authPage(false);
 pages['/register'] = () => authPage(true);
 
 const carLabel = (o) => esc(o.car) + (carMeta(o) ? ` <span class="muted">(${esc(carMeta(o))})</span>` : '') + (o.plate ? ` · <span class="plate">${esc(plateView(o.plate))}</span>` : '');
+const PAY = { cash: 'Наличные', card: 'Карта', transfer: 'Перевод', online: 'Онлайн' };
+// деньги по заказу: скидка, предоплата, оплачено
+function moneyLine(o) {
+  const parts = [];
+  if (o.discount) parts.push(`скидка ${rub(o.discount)}${o.discount_note ? ' (' + esc(o.discount_note) + ')' : ''}`);
+  if (o.prepay_due && (o.paid || 0) < o.prepay_due && !['done', 'cancelled'].includes(o.status)) parts.push(`<b style="color:var(--warn)">ждёт предоплату ${rub(o.prepay_due)}</b>`);
+  if (o.paid) parts.push(`оплачено ${rub(o.paid)}${o.paid < o.total_price ? `, остаток ${rub(o.total_price - o.paid)}` : ' ✓'}`);
+  return parts.length ? `<div class="muted">💳 ${parts.join(' · ')}</div>` : '';
+}
 function orderLine(o) {
   return `<div class="order">
     <div><b>${fmtDate(o.date)}, ${hm(o.start_min)}–${hm(o.end_min)}</b> ${badge(o.status)}</div>
-    <div>🚗 ${carLabel(o)}</div>
-    <div class="muted">${o.services.map((s) => esc(s.name)).join(', ')} · от ${rub(o.total_price)}</div>
+    ${o.onsite ? `<div>🚐 Выезд: ${esc(o.address)}</div>` : ''}${o.car ? `<div>🚗 ${carLabel(o)}</div>` : ''}
+    <div class="muted">${o.services.map((s) => esc(s.name)).join(', ')} · ${rub(o.total_price)}</div>
+    ${moneyLine(o)}
     ${o.comment ? `<div class="muted">💬 ${esc(o.comment)}</div>` : ''}
   </div>`;
 }
+
+// страница записи гостя (по секретной ссылке)
+pages['/order'] = async (token) => {
+  const o = await api('/api/guest/' + encodeURIComponent(token));
+  const url = location.href;
+  $app.innerHTML = `<div class="form" style="max-width:640px">
+    <h1>${o.status === 'cancelled' ? 'Запись отменена' : '✅ Вы записаны!'}</h1>
+    <div class="card">${orderLine(o)}</div>
+    ${o.status !== 'cancelled' ? `<div class="card" style="margin-top:14px"><h3>Сохраните эту страницу</h3>
+      <p class="muted">По этой ссылке можно посмотреть или отменить запись. Мы позвоним для подтверждения.</p>
+      <input value="${esc(url)}" readonly onclick="this.select()">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="btn small ghost" id="g-copy">Скопировать ссылку</button>
+        ${['new', 'confirmed'].includes(o.status) ? '<button class="btn small ghost" id="g-cancel">Отменить запись</button>' : ''}</div></div>` : ''}
+    ${!me ? `<div class="card" style="margin-top:14px"><h3>Создайте аккаунт</h3>
+      <p class="muted">История визитов, гараж с вашими авто, напоминания в Telegram и запись в один клик.</p>
+      <a class="btn small" href="#/register">Зарегистрироваться</a></div>` : ''}
+  </div>`;
+  const cp = document.getElementById('g-copy');
+  if (cp) cp.onclick = () => { navigator.clipboard?.writeText(url).then(() => toast('Ссылка скопирована'), () => toast('Скопируйте ссылку вручную', 1)); };
+  const cn = document.getElementById('g-cancel');
+  if (cn) cn.onclick = async () => {
+    if (!confirm('Отменить запись?')) return;
+    try { await api(`/api/guest/${encodeURIComponent(token)}/cancel`, {}); toast('Запись отменена'); route(); } catch (e) { toast(e.message, 1); }
+  };
+};
 
 pages['/my'] = async () => {
   if (!me) return (location.hash = '#/login?next=my');
@@ -465,7 +551,8 @@ async function ordersBoard(container, { admin }) {
     list.innerHTML = `<table><thead><tr><th>Когда</th><th>Клиент / авто</th><th>Работы</th><th>Статус</th><th>Мастер</th>${admin ? '<th></th>' : ''}</tr></thead><tbody>
       ${orders.map((o) => `<tr>
         <td><b>${fmtDate(o.date)}</b><br>${hm(o.start_min)}–${hm(o.end_min)}</td>
-        <td>${esc(o.client_name)}<br><a href="tel:${esc(o.client_phone)}">${esc(o.client_phone)}</a><br>🚗 ${carLabel(o)}${o.comment ? `<br><span class="muted">💬 ${esc(o.comment)}</span>` : ''}</td>
+        <td>${esc(o.client_name)}${o.user_id ? '' : ' <span class="badge">без аккаунта</span>'}<br><a href="tel:${esc(o.client_phone)}">${esc(o.client_phone)}</a>
+          ${o.onsite ? `<br>🚐 <b>Выезд:</b> ${esc(o.address)}` : ''}${o.car ? `<br>🚗 ${carLabel(o)}` : ''}${o.comment ? `<br><span class="muted">💬 ${esc(o.comment)}</span>` : ''}${moneyLine(o)}</td>
         <td>${o.services.map((s) => esc(s.name)).join('<br>')}<br>${admin ? `<input type="number" min="0" step="100" value="${o.total_price}" data-price="${o.id}" title="Итоговая сумма, ₽" style="min-width:90px;max-width:120px">` : `<span class="price">${rub(o.total_price)}</span>`}</td>
         <td>${admin
           ? `<select data-status="${o.id}">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${k === o.status ? 'selected' : ''}>${v}</option>`).join('')}</select>`
@@ -474,8 +561,11 @@ async function ordersBoard(container, { admin }) {
         <td>${admin
           ? `<select data-worker="${o.id}"><option value="">—</option>${workers.map((w) => `<option value="${w.id}" ${w.id === o.worker_id ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>`
           : o.worker_name ? esc(o.worker_name) : `<button class="btn small ghost" data-take="${o.id}">Взять</button>`}</td>
-        ${admin ? `<td><button class="btn small ghost" data-move="${o.id}" data-date="${o.date}" data-start="${o.start_min}">Перенести</button>
-          <button class="btn small danger" data-del="${o.id}">×</button></td>` : ''}
+        ${admin ? `<td style="white-space:nowrap"><button class="btn small ghost" data-pay="${o.id}" data-due="${Math.max(0, o.total_price - (o.paid || 0))}" title="Принять оплату">💳</button>
+          <button class="btn small ghost" data-disc="${o.id}" title="Скидка">%</button>
+          <button class="btn small ghost" data-pays="${o.id}" title="История оплат">≡</button><br>
+          <button class="btn small ghost" data-move="${o.id}" data-date="${o.date}" data-start="${o.start_min}" style="margin-top:4px">Перенести</button>
+          <button class="btn small danger" data-del="${o.id}" title="В корзину">×</button></td>` : ''}
       </tr>`).join('')}</tbody></table>`;
     const patch = async (id, body) => { try { await api(`/api/staff/orders/${id}`, body, 'PATCH'); toast('Сохранено'); } catch (e) { toast(e.message, 1); } reload(); };
     list.querySelectorAll('[data-status]').forEach((s) => (s.onchange = () => patch(s.dataset.status, { status: s.value })));
@@ -488,8 +578,29 @@ async function ordersBoard(container, { admin }) {
       const time = prompt('Новое время начала (ЧЧ:ММ)', hm(Number(b.dataset.start))); if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return;
       patch(b.dataset.move, { date, start_min: toMin(time) });
     }));
+    list.querySelectorAll('[data-pay]').forEach((b) => (b.onclick = async () => {
+      const amount = prompt('Сумма оплаты, ₽', b.dataset.due); if (!amount) return;
+      const m = prompt('Способ: 1 — наличные, 2 — карта, 3 — перевод, 4 — онлайн', '2'); if (!m) return;
+      const method = ['cash', 'card', 'transfer', 'online'][Number(m) - 1];
+      const kind = confirm('Это предоплата? (ОК — да, Отмена — обычная оплата)') ? 'prepay' : 'payment';
+      try { await api(`/api/admin/orders/${b.dataset.pay}/payments`, { amount, method, kind }); toast('Оплата принята'); } catch (e) { toast(e.message, 1); }
+      reload();
+    }));
+    list.querySelectorAll('[data-disc]').forEach((b) => (b.onclick = () => {
+      const discount = prompt('Скидка от суммы услуг: «10%» или сумма в ₽ (0 — убрать)', '10%'); if (discount === null) return;
+      const note = discount.trim() === '0' ? '' : prompt('Причина скидки (обязательно)', 'постоянный клиент'); if (note === null) return;
+      patch(b.dataset.disc, { discount, discount_note: note });
+    }));
+    list.querySelectorAll('[data-pays]').forEach((b) => (b.onclick = async () => {
+      const pays = await api(`/api/admin/orders/${b.dataset.pays}/payments`);
+      if (!pays.length) return toast('Оплат по заказу нет');
+      const txt = pays.map((p, i) => `${i + 1}) ${p.created_at.slice(0, 16)} — ${p.amount} ₽, ${PAY[p.method]}${p.kind === 'prepay' ? ' (предоплата)' : ''}`).join('\n');
+      const n = prompt(`${txt}\n\nЧтобы удалить ошибочную оплату, введите её номер:`, '');
+      if (!n || !pays[Number(n) - 1]) return;
+      await api(`/api/admin/payments/${pays[Number(n) - 1].id}`, undefined, 'DELETE'); toast('Оплата удалена'); reload();
+    }));
     list.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
-      if (!confirm('Удалить заказ безвозвратно?')) return;
+      if (!confirm('Удалить заказ? Он попадёт в корзину (Админка → Журнал), откуда его можно восстановить.')) return;
       try { await api(`/api/admin/orders/${b.dataset.del}`, undefined, 'DELETE'); } catch (e) { toast(e.message, 1); }
       reload();
     }));
@@ -512,11 +623,16 @@ const adminTabs = {
   create: ['➕ Новый заказ', (c) => bookingForm(c, { admin: true, onDone: () => { toast('Заказ создан'); location.hash = '#/admin?tab=orders'; } })],
   reports: ['📊 Отчёты', adminReports],
   leads: ['📞 Заявки', adminLeads],
+  repeats: ['🔁 Повторы', adminRepeats],
+  expenses: ['💸 Расходы', adminExpenses],
+  promos: ['🏷 Промокоды', adminPromos],
   reviews: ['⭐ Отзывы', adminReviews],
   works: ['🖼 Наши работы', adminWorks],
   services: ['🧽 Услуги', adminServices],
   pricing: ['💰 Цены по авто', adminPricing],
   users: ['👥 Пользователи', adminUsers],
+  workers: ['🗓 График мастеров', adminWorkers],
+  audit: ['📜 Журнал и корзина', adminAudit],
   settings: ['⚙️ Настройки', adminSettings],
 };
 pages['/admin'] = async () => {
@@ -536,16 +652,18 @@ async function adminServices(c) {
     <td><input name="price" type="number" min="0" step="100" value="${s.price ?? 0}" style="min-width:90px"></td>
     <td><input name="sort" type="number" value="${s.sort ?? 0}" style="min-width:60px"></td>
     <td><select name="scaled" title="Применять множитель кузова и класса"><option value="1" ${s.scaled !== 0 ? 'selected' : ''}>Да</option><option value="0" ${s.scaled === 0 ? 'selected' : ''}>Нет</option></select></td>
+    <td><select name="onsite" title="Выездная услуга: не занимает бокс, нужен адрес"><option value="0" ${s.onsite ? '' : 'selected'}>Нет</option><option value="1" ${s.onsite ? 'selected' : ''}>🚐 Да</option></select></td>
+    <td><input name="repeat_days" type="number" min="0" max="3650" value="${s.repeat_days || 0}" title="Через сколько дней напомнить о повторе (0 — не напоминать)" style="min-width:70px"></td>
     <td><select name="active"><option value="1" ${s.active !== 0 ? 'selected' : ''}>Да</option><option value="0" ${s.active === 0 ? 'selected' : ''}>Скрыта</option></select></td>
     <td><button class="btn small" data-save>${s.id ? 'Сохранить' : 'Добавить'}</button> ${s.id ? '<button class="btn small danger" data-del>×</button>' : ''}</td></tr>`;
   c.innerHTML = `<p class="muted">Длительность в минутах — по ней считается свободное время. Скрытые услуги не видны клиентам.</p>
-    <div class="table"><table><thead><tr><th>Услуга</th><th>Мин</th><th>Цена от, ₽</th><th>Порядок</th><th>Множитель авто</th><th>Видна</th><th></th></tr></thead>
+    <div class="table"><table><thead><tr><th>Услуга</th><th>Мин</th><th>Цена от, ₽</th><th>Порядок</th><th>Множитель авто</th><th>Выезд</th><th>Повтор, дн</th><th>Видна</th><th></th></tr></thead>
     <tbody>${list.map(row).join('')}${row()}</tbody></table></div>`;
   c.querySelectorAll('tr[data-id]').forEach((tr) => {
     const id = tr.dataset.id;
     tr.querySelector('[data-save]').onclick = async () => {
       const b = {}; tr.querySelectorAll('[name]').forEach((i) => (b[i.name] = i.value));
-      b.active = b.active === '1'; b.scaled = b.scaled === '1';
+      b.active = b.active === '1'; b.scaled = b.scaled === '1'; b.onsite = b.onsite === '1';
       try {
         await api(id ? `/api/admin/services/${id}` : '/api/admin/services', b, id ? 'PUT' : 'POST');
         toast('Сохранено'); await refreshServices(); adminServices(c);
@@ -620,6 +738,10 @@ async function adminSettingsForm(c) {
     <label>Сколько машин одновременно (боксы / мастера)</label><input name="capacity" type="number" min="1" max="50" value="${s.capacity}">
     <label>На сколько дней вперёд можно записаться</label><input name="booking_days" type="number" min="1" max="365" value="${s.booking_days}">
     <label>Выходные дни</label><div class="slots">${days.map((d, i) => `<label class="check"><input type="checkbox" name="off" value="${i}" ${s.days_off.includes(i) ? 'checked' : ''}> ${d}</label>`).join('')}</div>
+    <label>Выездных бригад одновременно</label><input name="onsite_capacity" type="number" min="0" max="20" value="${s.onsite_capacity}">
+    <label>Онлайн-отмена не позднее чем за, часов (0 — в любое время)</label><input name="cancel_hours" type="number" min="0" max="168" value="${s.cancel_hours}">
+    <label>Предоплата для заказов от, ₽ (0 — не нужна)</label><input name="prepay_from" type="number" min="0" step="1000" value="${s.prepay_from}">
+    <label>Размер предоплаты, %</label><input name="prepay_pct" type="number" min="1" max="100" value="${s.prepay_pct}">
     <label>Телефон</label><input name="phone" value="${esc(s.phone)}">
     <label>Адрес</label><input name="address" value="${esc(s.address)}">
     <button class="btn" style="margin-top:16px">Сохранить</button></form>`;
@@ -629,6 +751,7 @@ async function adminSettingsForm(c) {
     try {
       await api('/api/admin/settings', {
         price_body: s.price_body, price_class: s.price_class,
+        onsite_capacity: d.onsite_capacity, cancel_hours: d.cancel_hours, prepay_from: d.prepay_from, prepay_pct: d.prepay_pct,
         open_min: toMin(d.open), close_min: d.close === '00:00' ? 1440 : toMin(d.close), step_min: d.step_min, capacity: d.capacity,
         booking_days: d.booking_days, days_off: [...f.querySelectorAll('[name=off]:checked')].map((i) => i.value), phone: d.phone, address: d.address,
       }, 'PUT');
@@ -640,6 +763,7 @@ async function adminSettingsForm(c) {
 const settingsBody = (s) => ({
   open_min: s.open_min, close_min: s.close_min, step_min: s.step_min, capacity: s.capacity, booking_days: s.booking_days,
   days_off: s.days_off, phone: s.phone, address: s.address, price_body: s.price_body, price_class: s.price_class,
+  cancel_hours: s.cancel_hours, prepay_from: s.prepay_from, prepay_pct: s.prepay_pct, onsite_capacity: s.onsite_capacity,
 });
 async function adminPricing(c) {
   const s = await api('/api/settings');
@@ -674,6 +798,111 @@ async function adminPricing(c) {
       settings = await api('/api/settings'); toast('Множители сохранены');
     } catch (er) { toast(er.message, 1); }
   };
+}
+
+// ---------- админка v2 ----------
+async function adminRepeats(c) {
+  const list = await api('/api/admin/repeats');
+  c.innerHTML = `<p class="muted">Клиенты, которым пора повторить услугу (срок задаётся во вкладке «Услуги», колонка «Повтор, дн»).
+    Подключившим Telegram бот напоминает сам (днём, 11:00–20:00); остальным — позвоните. После контакта нажмите «Связались».</p>
+    ${list.length ? `<div class="table"><table><thead><tr><th>Пора с</th><th>Клиент</th><th>Услуга</th><th>Прошлый визит</th><th>Telegram</th><th></th></tr></thead><tbody>
+    ${list.map((r) => `<tr><td><b>${fmtDate(r.due)}</b></td>
+      <td>${esc(r.client_name)}<br><a href="tel:${esc(r.client_phone)}">${esc(phoneView(r.client_phone))}</a>${r.car ? `<br><span class="muted">🚗 ${esc(r.car)}</span>` : ''}</td>
+      <td>${esc(r.name)}<br><span class="muted">каждые ${r.repeat_days} дн.</span></td><td>${fmtDate(r.date)}</td>
+      <td>${r.sent_tg ? '✅ напомнили' : r.has_tg ? '⏳ напомним' : '<span class="muted">нет — звонок</span>'}</td>
+      <td><button class="btn small" data-h="${r.order_id}" data-s="${r.service_id}">Связались</button></td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="empty">Сейчас некому напоминать. Список наполнится, когда подойдут сроки повторов по выполненным заказам.</div>'}`;
+  c.querySelectorAll('[data-h]').forEach((b) => (b.onclick = async () => { await api('/api/admin/repeats/handled', { order_id: b.dataset.h, service_id: b.dataset.s }); adminRepeats(c); }));
+}
+
+async function adminPromos(c) {
+  const list = await api('/api/admin/promos');
+  c.innerHTML = `<form class="card" id="pf" style="margin-bottom:16px"><h3>Новый промокод</h3>
+      <div class="grid"><div><label>Код</label><input name="code" required maxlength="30" placeholder="DNA10" style="text-transform:uppercase"></div>
+      <div><label>Скидка</label><div style="display:flex;gap:6px"><input name="value" type="number" min="1" required style="min-width:80px"><select name="kind" style="max-width:90px"><option value="pct">%</option><option value="rub">₽</option></select></div></div>
+      <div><label>Лимит использований (0 — без лимита)</label><input name="max_uses" type="number" min="0" value="0"></div>
+      <div><label>Действует до</label><input name="valid_to" type="date"></div>
+      <div><label>Мин. сумма заказа, ₽</label><input name="min_total" type="number" min="0" value="0"></div>
+      <div><label>Заметка (для кого / откуда)</label><input name="note" maxlength="200" placeholder="Авито, октябрь"></div></div>
+      <button class="btn" style="margin-top:12px">Создать</button></form>
+    ${list.length ? `<div class="table"><table><thead><tr><th>Код</th><th>Скидка</th><th>Использован</th><th>До</th><th>От суммы</th><th>Заметка</th><th>Активен</th></tr></thead><tbody>
+    ${list.map((p) => `<tr style="${p.active ? '' : 'opacity:.5'}"><td><b>${esc(p.code)}</b></td><td>${p.kind === 'pct' ? p.value + '%' : rub(p.value)}</td>
+      <td>${p.used}${p.max_uses ? ' / ' + p.max_uses : ''}</td><td>${p.valid_to ? esc(p.valid_to) : '—'}</td><td>${p.min_total ? rub(p.min_total) : '—'}</td>
+      <td class="muted">${esc(p.note)}</td><td><input type="checkbox" data-p="${p.id}" ${p.active ? 'checked' : ''} style="width:auto"></td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="empty">Промокодов пока нет. Сделайте отдельный код под каждый канал рекламы — в отчётах будет видно, какой приводит клиентов.</div>'}`;
+  c.querySelector('#pf').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/api/admin/promos', formData(e.target)); toast('Промокод создан'); adminPromos(c); } catch (er) { toast(er.message, 1); }
+  };
+  c.querySelectorAll('[data-p]').forEach((i) => (i.onchange = async () => { await api(`/api/admin/promos/${i.dataset.p}`, { active: i.checked }, 'PATCH'); adminPromos(c); }));
+}
+
+async function adminExpenses(c) {
+  const st = adminExpenses.st ||= { from: isoDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)), to: today() };
+  const { categories, items } = await api(`/api/admin/expenses?from=${st.from}&to=${st.to}`);
+  const total = items.reduce((a, e) => a + e.amount, 0);
+  c.innerHTML = `<form class="card" id="ef" style="margin-bottom:16px"><h3>Добавить расход</h3>
+      <div class="grid"><div><label>Дата</label><input name="date" type="date" value="${today()}" required></div>
+      <div><label>Категория</label><select name="category">${categories.map((x) => `<option>${esc(x)}</option>`).join('')}</select></div>
+      <div><label>Сумма, ₽</label><input name="amount" type="number" min="1" required></div>
+      <div><label>Комментарий</label><input name="note" maxlength="200" placeholder="Например: полироль 3M, 2 шт."></div></div>
+      <button class="btn" style="margin-top:12px">Добавить</button></form>
+    <div class="toolbar"><div><label>С</label><input type="date" id="x-from" value="${st.from}"></div><div><label>По</label><input type="date" id="x-to" value="${st.to}"></div>
+      <div style="align-self:end">Итого: <b class="price">${rub(total)}</b></div></div>
+    ${items.length ? `<div class="table"><table><thead><tr><th>Дата</th><th>Категория</th><th>Сумма</th><th>Комментарий</th><th>Внёс</th><th></th></tr></thead><tbody>
+    ${items.map((e) => `<tr><td>${esc(e.date)}</td><td>${esc(e.category)}</td><td>${rub(e.amount)}</td><td class="muted">${esc(e.note)}</td><td class="muted">${esc(e.user_name || '')}</td>
+      <td><button class="btn small danger" data-x="${e.id}">×</button></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Расходов за период нет</div>'}
+    <p class="muted">Прибыль (выручка − расходы) — во вкладке «Отчёты».</p>`;
+  c.querySelector('#ef').onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api('/api/admin/expenses', formData(e.target)); toast('Расход добавлен'); adminExpenses(c); } catch (er) { toast(er.message, 1); }
+  };
+  c.querySelector('#x-from').onchange = (e) => { st.from = e.target.value; adminExpenses(c); };
+  c.querySelector('#x-to').onchange = (e) => { st.to = e.target.value; adminExpenses(c); };
+  c.querySelectorAll('[data-x]').forEach((b) => (b.onclick = async () => { if (confirm('Удалить расход?')) { await api(`/api/admin/expenses/${b.dataset.x}`, undefined, 'DELETE'); adminExpenses(c); } }));
+}
+
+async function adminWorkers(c) {
+  const ws = await api('/api/admin/workers');
+  const days = [[1, 'Пн'], [2, 'Вт'], [3, 'Ср'], [4, 'Чт'], [5, 'Пт'], [6, 'Сб'], [0, 'Вс']];
+  c.innerHTML = `<p class="muted">Свободное время для записи считается так: не больше боксов (Настройки) и не больше мастеров, которые работают в этот день.
+      Если мастер в отпуске или заболел — отметьте выходные, и окна закроются автоматически. Без мастеров в системе учитываются только боксы.</p>
+    ${ws.length ? ws.map((w) => `<div class="card" style="margin-bottom:12px">
+      <h3>${esc(w.name)} <span class="muted" style="font-weight:400">${esc(phoneView(w.phone))}</span></h3>
+      <label>Рабочие дни</label><div class="slots">${days.map(([d, n]) => `<label class="check"><input type="checkbox" data-w="${w.id}" value="${d}" ${w.work_days.split(',').includes(String(d)) ? 'checked' : ''}> ${n}</label>`).join('')}</div>
+      <label>Выходные / отпуск</label>
+      <div class="toolbar"><div><input type="date" id="of-${w.id}" min="${today()}"></div><div><input type="date" id="ot-${w.id}" min="${today()}"></div>
+        <button class="btn small" data-off="${w.id}" style="align-self:center">Добавить</button></div>
+      <div class="slots">${w.offs.length ? w.offs.map((d) => `<button class="slot" data-rm="${w.id}" data-d="${d}" title="Убрать">${esc(fmtDate(d))} ×</button>`).join('') : '<span class="muted">нет</span>'}</div>
+    </div>`).join('') : '<div class="empty">Мастеров пока нет. Мастер регистрируется с кодом сотрудника или вы назначаете роль во вкладке «Пользователи».</div>'}`;
+  c.querySelectorAll('[data-w]').forEach((i) => (i.onchange = async () => {
+    const id = i.dataset.w;
+    await api(`/api/admin/workers/${id}/days`, { days: [...c.querySelectorAll(`[data-w="${id}"]:checked`)].map((x) => x.value) }, 'PUT');
+    toast('График сохранён');
+  }));
+  c.querySelectorAll('[data-off]').forEach((b) => (b.onclick = async () => {
+    const id = b.dataset.off, from = c.querySelector('#of-' + id).value, to = c.querySelector('#ot-' + id).value || from;
+    if (!from) return toast('Выберите дату', 1);
+    try { await api(`/api/admin/workers/${id}/off`, { from, to }); adminWorkers(c); } catch (e) { toast(e.message, 1); }
+  }));
+  c.querySelectorAll('[data-rm]').forEach((b) => (b.onclick = async () => { await api(`/api/admin/workers/${b.dataset.rm}/off/${b.dataset.d}`, undefined, 'DELETE'); adminWorkers(c); }));
+}
+
+async function adminAudit(c) {
+  const st = adminAudit.st ||= { q: '' };
+  const [log, trash] = await Promise.all([api('/api/admin/audit?q=' + encodeURIComponent(st.q)), api('/api/admin/trash')]);
+  c.innerHTML = `${trash.length ? `<div class="card" style="margin-bottom:16px"><h3>🗑 Корзина заказов</h3><div class="table"><table><thead><tr><th>Удалён</th><th>Кем</th><th>Заказ</th><th></th></tr></thead><tbody>
+      ${trash.map((t) => `<tr><td class="muted">${esc(t.deleted_at.slice(0, 16))}</td><td>${esc(t.deleted_by)}</td>
+        <td>№${t.order_id} · ${esc(t.data.order.client_name)} · ${esc(t.data.order.date)} ${hm(t.data.order.start_min)} · ${rub(t.data.order.total_price)}</td>
+        <td><button class="btn small" data-r="${t.id}">Восстановить</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+    <div class="toolbar"><div style="flex:1"><label>Поиск: сотрудник, действие, № заказа</label><input id="a-q" value="${esc(st.q)}" placeholder="Например: скидка"></div></div>
+    <div class="table"><table><thead><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Объект</th><th>Подробности</th></tr></thead><tbody>
+    ${log.map((a) => `<tr><td class="muted" style="white-space:nowrap">${esc(a.at.slice(0, 16))}</td><td>${esc(a.user_name)}</td><td>${esc(a.action)}</td>
+      <td class="muted">${a.entity === 'order' ? 'заказ №' : a.entity === 'user' ? 'польз. №' : esc(a.entity) + ' '}${esc(a.entity_id || '')}</td><td>${esc(a.details)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">Пусто</td></tr>'}</tbody></table></div>`;
+  c.querySelector('#a-q').onchange = (e) => { st.q = e.target.value; adminAudit(c); };
+  c.querySelectorAll('[data-r]').forEach((b) => (b.onclick = async () => {
+    try { await api(`/api/admin/trash/${b.dataset.r}/restore`, {}); toast('Заказ восстановлен'); adminAudit(c); } catch (e) { toast(e.message, 1); }
+  }));
 }
 
 // ---------- отчёты ----------
@@ -748,6 +977,11 @@ async function adminReports(c) {
       ${tile('Клиентов', k.clients, `повторных: ${k.repeat_clients} (${pct(k.repeat_clients, k.clients)}%)`)}
       ${tile('Регистраций', k.new_users)}
       ${tile('Заявок на звонок', k.leads)}
+      ${tile('Получено денег', rub(k.received), 'по оплатам за период')}
+      ${tile('Расходы', rub(k.expenses))}
+      ${tile('Прибыль', rub(k.profit), 'выручка − расходы')}
+      ${tile('Не оплачено', rub(k.unpaid), 'по выполненным заказам')}
+      ${tile('Скидки', rub(k.discounts), 'по выполненным заказам')}
     </div>
     <div class="charts">
       <div class="card"><h3>Выручка по ${b.unit === 'день' ? 'дням' : 'неделям'}</h3><div class="muted">Сумма выполненных заказов, ₽</div>
@@ -760,6 +994,12 @@ async function adminReports(c) {
         ${barList(r.makes.map((m) => ({ name: m.name, value: m.n })))}</div>
       <div class="card"><h3>Загрузка по дням недели</h3><div class="muted">Число заказов — где можно дать скидку на «пустые» дни</div>
         ${colChart([1, 2, 3, 4, 5, 6, 0].map((d) => { const n = r.weekdays.find((w) => w.wd === d)?.n || 0; return { label: WD[d], value: n, tip: `${WD[d]}: ${n}` }; }))}</div>
+      <div class="card"><h3>Расходы по категориям</h3>
+        ${barList(r.expenses.map((x) => ({ name: x.name, value: x.sum })), rub)}</div>
+      <div class="card"><h3>Оплаты по способам</h3>
+        ${barList(r.pay_methods.map((x) => ({ name: x.name, value: x.sum })), rub)}</div>
+      <div class="card"><h3>Промокоды</h3><div class="muted">Сколько заказов привёл каждый код</div>
+        ${barList(r.promos.map((x) => ({ name: `${x.name} (−${rub(x.sum)})`, value: x.n })))}</div>
       <div class="card"><h3>Статусы заказов</h3>
         ${barList(Object.keys(STATUS).map((s) => ({ name: STATUS[s], value: statusMap[s] || 0 })).filter((x) => x.value))}</div>
     </div>
@@ -1090,7 +1330,10 @@ async function route() {
   const path = (location.hash.slice(1) || '/').split('?')[0];
   renderNav();
   document.body.classList.toggle('wide', path === '/admin');
-  try { await (pages[path] || pages['/'])(); } catch (e) { $app.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  try {
+    if (path.startsWith('/order/')) await pages['/order'](path.slice(7));
+    else await (pages[path] || pages['/'])();
+  } catch (e) { $app.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', route);
