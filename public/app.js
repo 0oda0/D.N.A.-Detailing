@@ -24,18 +24,8 @@ const isoDate = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStar
 const today = () => isoDate(new Date());
 const STATUS = { new: 'Новый', confirmed: 'Подтверждён', in_progress: 'В работе', done: 'Готово', cancelled: 'Отменён' };
 const ROLE = { client: 'Клиент', worker: 'Мастер', admin: 'Админ' };
-// контакты и бренд приходят из настроек (Админка → Настройки → Бренд)
-let TG = [], TG_CHANNEL = '';
-const chatLink = () => (TG[0] ? `https://t.me/${TG[0][0]}` : `tel:${tel()}`);
-function applyBrand() {
-  TG = settings.tg_contacts || []; TG_CHANNEL = settings.tg_channel || '';
-  document.title = `${settings.brand_name} ${settings.brand_sub} — онлайн-запись`.trim();
-  document.querySelector('.logo').innerHTML = `${esc(settings.brand_name)}<span>${esc(settings.brand_sub)}</span>`;
-  document.getElementById('foot-brand').textContent = `${settings.brand_name} ${settings.brand_sub} · ${settings.tagline}`;
-  const c = settings.brand_color || '#2f8cff';
-  document.documentElement.style.setProperty('--blue', c);
-  document.documentElement.style.setProperty('--blue2', c);
-}
+const TG = [['brorussian8', 'Даниил'], ['nikilovs', 'Никита']];
+const TG_CHANNEL = 'https://t.me/DNADetailing';
 const tel = () => esc(settings.phone.replace(/[^\d+]/g, ''));
 const badge = (s) => `<span class="badge st-${s}">${STATUS[s]}</span>`;
 
@@ -72,7 +62,7 @@ function renderNav() {
   const lo = document.getElementById('logout');
   if (lo) lo.onclick = async () => { await api('/api/logout', {}); me = null; location.hash = '#/'; route(); };
   document.getElementById('foot-contacts').innerHTML = settings
-    ? `<a href="tel:${tel()}">${esc(settings.phone)}</a>${TG.map(([u]) => ` · <a href="https://t.me/${esc(u)}" target="_blank" rel="noopener">@${esc(u)}</a>`).join('')}${TG_CHANNEL ? ` · <a href="${esc(TG_CHANNEL)}" target="_blank" rel="noopener">Канал</a>` : ''}<br>${esc(settings.address)} · ${hm(settings.open_min)}–${hm(settings.close_min)}`
+    ? `<a href="tel:${tel()}">${esc(settings.phone)}</a> · ${TG.map(([u]) => `<a href="https://t.me/${u}" target="_blank" rel="noopener">@${u}</a>`).join(' · ')} · <a href="${TG_CHANNEL}" target="_blank" rel="noopener">Канал</a><br>${esc(settings.address)} · ${hm(settings.open_min)}–${hm(settings.close_min)}`
     : '';
 }
 
@@ -95,19 +85,19 @@ const FAQ = [
   ['Сколько стоят работы?', 'На сайте указаны цены «от». Итоговую стоимость называем после осмотра — она зависит от класса и состояния авто. Напишите в Telegram, пришлите фото — посчитаем заранее.'],
   ['Сколько времени займёт?', 'Длительность каждой услуги указана в карточке. При онлайн-записи сайт сам суммирует время и показывает только те окна, когда мы свободны.'],
   ['Можно оставить машину на день?', 'Да. Для бронирования плёнкой, шумоизоляции и комплексных работ авто остаётся у нас — время согласуем при записи.'],
-  ['Вы выезжаете?', `Да, химчистку салона и мягкой мебели делаем на выезде {city}.`],
+  ['Вы выезжаете?', 'Да, химчистку салона и мягкой мебели делаем на выезде по Балашихе и окрестностям.'],
   ['Как отменить или перенести запись?', 'В личном кабинете в разделе «Мои заказы» или сообщением в Telegram.'],
 ];
 const scrollTo = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
 
 pages['/'] = () => {
-  const tg = chatLink();
+  const tg = `https://t.me/${TG[0][0]}`;
   $app.innerHTML = `
   <section class="hero">
-    <div class="tag">📍 ${esc(settings.hero_tag)}</div>
-    <h1>${esc(settings.brand_name)}<span>${esc(settings.brand_sub)}</span></h1>
-    <p>${esc(settings.tagline)}</p>
-    <div class="lead">${esc(settings.hero_lead)}</div>
+    <div class="tag">📍 Балашиха, ул. Свердлова · новый детейлинг-центр</div>
+    <h1>D.N.A.<span>DETAILING</span></h1>
+    <p>Чистота в деталях • Совершенство в результате</p>
+    <div class="lead">Наводим идеальный лоск, защищаем кузов от сколов и возвращаем салону вид нового авто.</div>
     <ul class="ticks">
       <li>Онлайн-запись только на свободное время</li>
       <li>Стоимость фиксируем до начала работ</li>
@@ -126,7 +116,7 @@ pages['/'] = () => {
     <div><b>24/7</b><span>онлайн-запись</span></div>
   </section>
 
-  <section class="reveal"><h2>Почему ${esc(settings.brand_name)}</h2>
+  <section class="reveal"><h2>Почему D.N.A.</h2>
     <div class="grid">${ADVANTAGES.map(([i, t, d]) => `<div class="card adv"><div class="ico">${i}</div><h3>${t}</h3><div class="muted">${d}</div></div>`).join('')}</div>
   </section>
 
@@ -165,7 +155,7 @@ pages['/'] = () => {
 
   <div id="reviews-sec"></div>
   <section class="reveal"><h2>Частые вопросы</h2>
-    <div class="faq">${FAQ.map(([q, a]) => `<details class="card"><summary>${q}</summary><div class="muted">${a.replace('{city}', esc(settings.city))}</div></details>`).join('')}</div>
+    <div class="faq">${FAQ.map(([q, a]) => `<details class="card"><summary>${q}</summary><div class="muted">${a}</div></details>`).join('')}</div>
   </section>
 
   <section class="card lead-form reveal" id="lead">
@@ -185,10 +175,10 @@ pages['/'] = () => {
       <p class="muted">Ежедневно ${hm(settings.open_min)}–${hm(settings.close_min)}</p>
       <a class="btn small ghost" href="https://yandex.ru/maps/?text=${encodeURIComponent(settings.address)}" target="_blank" rel="noopener">Открыть на карте</a></div>
     <div class="card"><h3>📲 Запись и расчёт стоимости</h3>
-      ${TG.map(([u, n]) => `<div>Telegram <a href="https://t.me/${esc(u)}" target="_blank" rel="noopener">@${esc(u)}</a>${n ? ` (${esc(n)})` : ''}</div>`).join('')}
+      ${TG.map(([u, n]) => `<div>Telegram <a href="https://t.me/${u}" target="_blank" rel="noopener">@${u}</a> (${n})</div>`).join('')}
       <div style="margin-top:6px">Телефон <a href="tel:${tel()}">${esc(settings.phone)}</a></div></div>
-    ${TG_CHANNEL ? `<div class="card"><h3>📣 Наш канал</h3><div class="muted">Работы, акции и новости</div>
-      <a class="btn small" style="margin-top:10px" href="${esc(TG_CHANNEL)}" target="_blank" rel="noopener">${esc(TG_CHANNEL.replace(/^https:\/\//, ''))}</a></div>` : ''}
+    <div class="card"><h3>📣 Наш канал</h3><div class="muted">Работы, акции и новости</div>
+      <a class="btn small" style="margin-top:10px" href="${TG_CHANNEL}" target="_blank" rel="noopener">t.me/DNADetailing</a></div>
   </div></section>`;
 
   $app.querySelectorAll('[data-scroll]').forEach((b) => (b.onclick = () => scrollTo(b.dataset.scroll)));
@@ -234,7 +224,7 @@ function bookingForm(container, { admin, onDone }) {
         <label>Телефон</label><input id="b-cphone" type="tel" placeholder="+7…"></div>` : ''}
       <div class="card"><h3>1. Что сделать</h3><div class="grid" id="b-services"></div></div>
       <div class="card" id="b-addrcard" hidden><h3>🚐 Адрес выезда</h3>
-        <label>Город, улица, дом, квартира / гараж</label><input id="b-address" maxlength="200" value="${esc(draft.address)}" placeholder="Город, ул. …">
+        <label>Город, улица, дом, квартира / гараж</label><input id="b-address" maxlength="200" value="${esc(draft.address)}" placeholder="Балашиха, ул. …">
         <div class="muted" style="margin-top:6px">Мастер приедет к вам. Автомобиль для этой услуги указывать не обязательно.</div></div>
       <div class="card" id="b-carcard"><h3>2. Автомобиль</h3><div class="slots" id="b-garage"></div>
         <label>Марка</label>
@@ -741,19 +731,7 @@ async function adminSettings(c) {
 async function adminSettingsForm(c) {
   const s = await api('/api/settings');
   const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-  const contacts = (s.tg_contacts || []).map(([u, n]) => (n ? `${u}:${n}` : u)).join(', ');
-  c.innerHTML = `<form class="card form" id="sf" style="margin:0;max-width:640px">
-    <h3>🎨 Бренд — всё, что меняется под компанию</h3>
-    <div class="grid"><div><label>Название</label><input name="brand_name" maxlength="40" value="${esc(s.brand_name)}" required></div>
-      <div><label>Подпись под названием</label><input name="brand_sub" maxlength="40" value="${esc(s.brand_sub)}"></div></div>
-    <label>Слоган</label><input name="tagline" maxlength="120" value="${esc(s.tagline)}">
-    <label>Плашка на главной (город, район, особенность)</label><input name="hero_tag" maxlength="120" value="${esc(s.hero_tag)}">
-    <label>Текст на главной</label><textarea name="hero_lead" maxlength="300">${esc(s.hero_lead)}</textarea>
-    <div class="grid"><div><label>Фирменный цвет</label><input name="brand_color" type="color" value="${esc(s.brand_color)}" style="height:44px;padding:4px"></div>
-      <div><label>Зона выезда (для FAQ)</label><input name="city" maxlength="80" value="${esc(s.city)}" placeholder="по городу и области"></div></div>
-    <label>Telegram для записи — «логин:Имя» через запятую</label><input name="tg_contacts" maxlength="300" value="${esc(contacts)}" placeholder="ivan_master:Иван, studio_admin:Ольга">
-    <label>Telegram-канал (ссылка https://t.me/…)</label><input name="tg_channel" maxlength="200" value="${esc(s.tg_channel)}">
-    <h3 style="margin-top:20px">🕒 Расписание и правила</h3>
+  c.innerHTML = `<form class="card form" id="sf" style="margin:0">
     <label>Открытие</label><input name="open" type="time" value="${hm(s.open_min)}" required>
     <label>Закрытие</label><input name="close" type="time" value="${hm(s.close_min)}" required>
     <label>Шаг сетки записи, мин</label><input name="step_min" type="number" min="5" max="240" value="${s.step_min}">
@@ -776,10 +754,8 @@ async function adminSettingsForm(c) {
         onsite_capacity: d.onsite_capacity, cancel_hours: d.cancel_hours, prepay_from: d.prepay_from, prepay_pct: d.prepay_pct,
         open_min: toMin(d.open), close_min: d.close === '00:00' ? 1440 : toMin(d.close), step_min: d.step_min, capacity: d.capacity,
         booking_days: d.booking_days, days_off: [...f.querySelectorAll('[name=off]:checked')].map((i) => i.value), phone: d.phone, address: d.address,
-        brand_name: d.brand_name, brand_sub: d.brand_sub, tagline: d.tagline, hero_tag: d.hero_tag, hero_lead: d.hero_lead,
-        brand_color: d.brand_color, city: d.city, tg_contacts: d.tg_contacts, tg_channel: d.tg_channel,
       }, 'PUT');
-      settings = await api('/api/settings'); applyBrand(); renderNav(); toast('Настройки сохранены');
+      settings = await api('/api/settings'); renderNav(); toast('Настройки сохранены');
     } catch (er) { toast(er.message, 1); }
   };
 }
@@ -842,7 +818,7 @@ async function adminRepeats(c) {
 async function adminPromos(c) {
   const list = await api('/api/admin/promos');
   c.innerHTML = `<form class="card" id="pf" style="margin-bottom:16px"><h3>Новый промокод</h3>
-      <div class="grid"><div><label>Код</label><input name="code" required maxlength="30" placeholder="SALE10" style="text-transform:uppercase"></div>
+      <div class="grid"><div><label>Код</label><input name="code" required maxlength="30" placeholder="DNA10" style="text-transform:uppercase"></div>
       <div><label>Скидка</label><div style="display:flex;gap:6px"><input name="value" type="number" min="1" required style="min-width:80px"><select name="kind" style="max-width:90px"><option value="pct">%</option><option value="rub">₽</option></select></div></div>
       <div><label>Лимит использований (0 — без лимита)</label><input name="max_uses" type="number" min="0" value="0"></div>
       <div><label>Действует до</label><input name="valid_to" type="date"></div>
@@ -1147,7 +1123,7 @@ async function homeExtras() {
   if (ws && works.length) {
     ws.innerHTML = `<section><h2>Наши работы</h2><p class="muted">Потяните ползунок, чтобы сравнить «до» и «после»</p>
       <div class="grid">${works.map((w) => `<div class="card work">${baSlider(w)}${w.title ? `<h3>${esc(w.title)}</h3>` : ''}</div>`).join('')}</div>
-      ${TG_CHANNEL ? `<p><a class="btn ghost small" href="${esc(TG_CHANNEL)}" target="_blank" rel="noopener">Больше работ в Telegram-канале</a></p>` : ''}</section>`;
+      <p><a class="btn ghost small" href="${TG_CHANNEL}" target="_blank" rel="noopener">Больше работ в Telegram-канале</a></p></section>`;
     bindSliders(ws);
   }
   if (rs && reviews.length) {
@@ -1364,7 +1340,7 @@ window.addEventListener('hashchange', route);
 function floatButtons() {
   const d = document.createElement('div');
   d.className = 'fab';
-  d.innerHTML = `${TG[0] ? `<a href="https://t.me/${esc(TG[0][0])}" target="_blank" rel="noopener" class="fab-tg" title="Telegram">✈</a>` : ''}
+  d.innerHTML = `<a href="https://t.me/${TG[0][0]}" target="_blank" rel="noopener" class="fab-tg" title="Telegram">✈</a>
     <a href="tel:${tel()}" class="fab-tel" title="Позвонить">📞</a>`;
   document.body.appendChild(d);
   const m = document.createElement('a');
@@ -1374,7 +1350,6 @@ function floatButtons() {
 (async () => {
   [me, settings] = await Promise.all([api('/api/me'), api('/api/settings')]);
   await refreshServices();
-  applyBrand();
   floatButtons();
   callBubble();
   route();

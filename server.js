@@ -7,13 +7,13 @@ const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const ADMIN_PHONE = process.env.ADMIN_PHONE || '+79990000000';
+const ADMIN_PHONE = process.env.ADMIN_PHONE || '+79686107799';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin12345';
-const WORKER_CODE = process.env.WORKER_CODE || 'staff-code';
+const WORKER_CODE = process.env.WORKER_CODE || 'dna-staff';
 const SESSION_DAYS = 30;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
-const db = new DatabaseSync(path.join(DATA_DIR, process.env.DB_FILE || 'app.sqlite'));
+const db = new DatabaseSync(path.join(DATA_DIR, 'dna.sqlite'));
 db.exec(`
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -221,18 +221,8 @@ const DEFAULT_SETTINGS = {
   capacity: '2', // сколько машин одновременно (боксы/мастера)
   days_off: '', // дни недели через запятую: 0=вс … 6=сб
   booking_days: '60',
-  address: 'г. Москва, ул. Примерная, 1',
-  phone: '+7 (999) 000-00-00',
-  // бренд — всё, что меняется под конкретную компанию (Админка → Настройки → Бренд)
-  brand_name: 'AUTO STUDIO',
-  brand_sub: 'DETAILING',
-  tagline: 'Чистота в деталях • Совершенство в результате',
-  hero_tag: 'Детейлинг-центр полного цикла',
-  hero_lead: 'Наводим идеальный лоск, защищаем кузов от сколов и возвращаем салону вид нового авто.',
-  brand_color: '#2f8cff',
-  tg_contacts: '', // «username:Имя, username2:Имя»
-  tg_channel: '',
-  city: 'по городу и области',
+  address: 'г. Балашиха, ул. Свердлова, вл. 36',
+  phone: '+7 (968) 610 77 99',
   price_body: '{}',
   price_class: '{}',
   cancel_hours: '12', // онлайн-отмена не позднее чем за N часов
@@ -260,9 +250,6 @@ function getSettings() {
     days_off: s.days_off ? s.days_off.split(',').map(Number) : [],
     address: s.address, phone: s.phone,
     price_body: JSON.parse(s.price_body || '{}'), price_class: JSON.parse(s.price_class || '{}'),
-    brand_name: s.brand_name, brand_sub: s.brand_sub, tagline: s.tagline, hero_tag: s.hero_tag, hero_lead: s.hero_lead,
-    brand_color: s.brand_color, tg_channel: s.tg_channel, city: s.city,
-    tg_contacts: String(s.tg_contacts || '').split(',').map((x) => x.trim().replace(/^@/, '').split(':')).filter((x) => x[0]).map(([u, n]) => [u.trim(), (n || '').trim()]),
     cancel_hours: +s.cancel_hours, prepay_from: +s.prepay_from, prepay_pct: +s.prepay_pct, onsite_capacity: +s.onsite_capacity,
     body_types: BODY_TYPES, car_classes: CAR_CLASSES,
   };
@@ -749,7 +736,7 @@ app.get('/api/admin/reports.csv', need('admin'), (req, res, next) => {
     for (const o of rows) lines.push([o.id, o.date, hhmm(o.start_min), hhmm(o.end_min), o.client_name, o.client_phone, o.car_make || o.car, o.car_model, o.plate, BODY_TYPES[o.car_body] || '', o.car_class, o.price_k,
       o.services.map((x) => x.name).join(', '), o.discount, o.promo_code, o.total_price, o.paid, o.address, STATUS_RU[o.status], o.worker_name, o.comment].map(q).join(';'));
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="orders-${from}_${to}.csv"`);
+    res.setHeader('Content-Disposition', `attachment; filename="dna-orders-${from}_${to}.csv"`);
     res.send('\ufeff' + lines.join('\r\n'));
   } catch (e) { next(e); }
 });
@@ -810,18 +797,6 @@ app.patch('/api/admin/users/:id', need('admin'), h((req) => {
   audit(req.user, 'сменил роль', 'user', req.params.id, req.body.role);
 }));
 
-function brandVals(b) {
-  const cur = getSettings();
-  const v = (k, max) => str(b[k] ?? cur[k], max);
-  const color = v('brand_color', 7);
-  const contacts = Array.isArray(b.tg_contacts) ? b.tg_contacts.map((x) => x.join(':')).join(', ') : str(b.tg_contacts ?? cur.tg_contacts.map((x) => x.join(':')).join(', '), 300);
-  if (!/^#[0-9a-fA-F]{6}$/.test(color)) throw new HttpError(400, 'Цвет — в формате #2f8cff');
-  if (!v('brand_name', 40)) throw new HttpError(400, 'Укажите название компании');
-  const ch = v('tg_channel', 200);
-  if (ch && !/^https:\/\//.test(ch)) throw new HttpError(400, 'Ссылка на канал должна начинаться с https://');
-  return { brand_name: v('brand_name', 40), brand_sub: v('brand_sub', 40), tagline: v('tagline', 120), hero_tag: v('hero_tag', 120),
-    hero_lead: v('hero_lead', 300), brand_color: color.toLowerCase(), tg_contacts: contacts, tg_channel: ch, city: v('city', 80) };
-}
 function multipliers(obj, allowed) {
   const out = {};
   for (const k of Object.keys(allowed)) {
@@ -841,7 +816,6 @@ app.put('/api/admin/settings', need('admin'), h((req) => {
     address: str(b.address, 200), phone: str(b.phone, 40),
     price_body: JSON.stringify(multipliers(b.price_body, BODY_TYPES)),
     price_class: JSON.stringify(multipliers(b.price_class, CAR_CLASSES)),
-    ...brandVals(b),
     cancel_hours: num(b.cancel_hours ?? 12, 0, 168), prepay_from: num(b.prepay_from ?? 0, 0, 10000000),
     prepay_pct: num(b.prepay_pct ?? 30, 1, 100), onsite_capacity: num(b.onsite_capacity ?? 1, 0, 20),
   };
@@ -887,7 +861,7 @@ function notifyClient(orderId, kind) {
     done: `🎉 <b>Ваш автомобиль готов!</b>\n🚗 ${tgEsc(o.car)}\nБудем рады отзыву${SITE_URL ? ` в личном кабинете: ${SITE_URL}/#/my` : ' в личном кабинете на сайте'}`,
     cancelled: `❌ Запись отменена\n${orderText(o)}`,
     moved: `🔁 <b>Запись перенесена</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}`,
-    reminder: `⏰ <b>Напоминаем о записи в ${tgEsc(getSettings().brand_name)}</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}\n\nЕсли планы изменились — отмените запись в личном кабинете или напишите нам.`,
+    reminder: `⏰ <b>Напоминаем о записи в D.N.A. Detailing</b>\n${orderText(o)}\n📍 ${tgEsc(addr)}\n\nЕсли планы изменились — отмените запись в личном кабинете или напишите нам.`,
   }[kind];
   if (msg) tgSend(o.tg_chat_id, msg);
 }
@@ -909,7 +883,7 @@ async function tgPoll() {
           ? `Готово, ${tgEsc(user.name)}! Сюда будут приходить новые записи, заявки и отзывы.`
           : `Готово, ${tgEsc(user.name)}! Мы пришлём напоминание за день до визита и сообщим, когда авто будет готово.`);
       } else {
-        tgSend(m.chat.id, `Здравствуйте! Это бот ${tgEsc(getSettings().brand_name)}.\nЧтобы получать напоминания о записи, нажмите «Подключить Telegram» в личном кабинете на сайте${SITE_URL ? ': ' + SITE_URL : ''}.\n📲 Запись: ${tgEsc(getSettings().phone)}`);
+        tgSend(m.chat.id, `Здравствуйте! Это бот D.N.A. Detailing.\nЧтобы получать напоминания о записи, нажмите «Подключить Telegram» в личном кабинете на сайте${SITE_URL ? ': ' + SITE_URL : ''}.\n📲 Запись: ${tgEsc(getSettings().phone)}`);
       }
     }
   }
@@ -1272,4 +1246,4 @@ app.use((err, _req, res, _next) => {
   res.status(status).json({ error: status === 500 ? 'Ошибка сервера' : err.message });
 });
 
-app.listen(PORT, () => console.log(`Сайт запущен: http://0.0.0.0:${PORT}`));
+app.listen(PORT, () => console.log(`D.N.A. Detailing: http://0.0.0.0:${PORT}`));
