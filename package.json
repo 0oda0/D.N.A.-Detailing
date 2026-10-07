@@ -1,8 +1,8 @@
 {
-  "name": "dna-detailing",
+  "name": "studio-booking-template",
   "version": "1.0.0",
   "private": true,
-  "description": "D.N.A. Detailing — сайт-визитка с онлайн-записью и админкой",
+  "description": "White-label шаблон: сайт с онлайн-записью, кабинетами и CRM для сервисного бизнеса",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
